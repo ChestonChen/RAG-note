@@ -145,14 +145,22 @@ def test_concurrent_same_name_uploads_reserve_distinct_destinations(tmp_path):
 
 
 def test_upload_temp_file_is_not_an_ingestion_candidate(tmp_path):
-    _, _, app = _app(tmp_path)
+    settings, _, app = _app(tmp_path)
     captured_sources = []
+    captured_reservations = []
     import rag_service.app.api as api_module
 
     original_replace = api_module.os.replace
 
     def capture_replace(source, destination):
         captured_sources.append(source)
+        root = settings.resolved_knowledge_root()
+        captured_reservations.extend(path for path in root.iterdir() if path.suffix == ".uploadlock")
+        assert not [
+            path
+            for path in root.iterdir()
+            if path.suffix.lower() in {".md", ".markdown", ".pdf"}
+        ]
         return original_replace(source, destination)
 
     with patch.object(api_module.os, "replace", side_effect=capture_replace):
@@ -165,6 +173,9 @@ def test_upload_temp_file_is_not_an_ingestion_candidate(tmp_path):
     assert captured_sources
     assert captured_sources[0].suffix == ".uploadtmp"
     assert captured_sources[0].suffix not in {".md", ".markdown", ".pdf"}
+    assert captured_reservations
+    assert all(path.suffix not in {".md", ".markdown", ".pdf"} for path in captured_reservations)
+    assert all(not path.exists() for path in captured_reservations)
 
 
 def test_upload_rejects_files_over_configured_limit(tmp_path):

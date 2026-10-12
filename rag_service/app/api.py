@@ -558,9 +558,10 @@ def create_app(
                     destination.relative_to(root)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail="filename must be a safe basename") from exc
+                reservation_path = root / f".{candidate_name}.uploadlock"
                 try:
                     reservation = os.open(
-                        destination,
+                        reservation_path,
                         os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                     )
                 except FileExistsError:
@@ -568,11 +569,17 @@ def create_app(
                     continue
                 os.close(reservation)
                 try:
+                    # A destination may have appeared after candidate selection
+                    # but before lock creation; never replace an existing file.
+                    if destination.exists():
+                        duplicate += 1
+                        continue
                     os.replace(temporary_path, destination)
                     temporary_path = None
                 except Exception:
-                    destination.unlink(missing_ok=True)
                     raise
+                finally:
+                    reservation_path.unlink(missing_ok=True)
                 break
             return KnowledgeUploadResponse(
                 source_path=destination.relative_to(root).as_posix(),
