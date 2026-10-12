@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from .config import Settings, get_settings
@@ -75,6 +76,51 @@ class ChatGenerationService:
         if not content:
             raise RuntimeError("LLM response contained an empty message")
         return str(content).strip()
+
+    def stream(self, question: str, context: ContextPackage) -> Iterator[str]:
+        """Yield answer fragments from the OpenAI-compatible streaming API.
+
+        The OpenAI SDK has returned both dictionary-like and attribute-based
+        chunks across versions and compatible providers, so chunk extraction is
+        intentionally tolerant.  A local fallback keeps the stream endpoint
+        useful in credential-free development environments.
+        """
+
+        if not self.settings.llm_api_key:
+            answer = self._fallback_answer(question, context)
+            if answer:
+                yield answer
+            return
+
+        response = self.client.chat.completions.create(
+            model=self.settings.llm_model,
+            temperature=0.1,
+            stream=True,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_prompt(question, context)},
+            ],
+        )
+
+        def field(value: Any, name: str, default: Any = None) -> Any:
+            if isinstance(value, dict):
+                return value.get(name, default)
+            return getattr(value, name, default)
+
+        emitted = False
+        for chunk in response:
+            choices = field(chunk, "choices", []) or []
+            if not choices:
+                continue
+            delta = field(choices[0], "delta")
+            if delta is None:
+                continue
+            content = field(delta, "content")
+            if content:
+                emitted = True
+                yield str(content)
+        if not emitted:
+            raise RuntimeError("LLM stream did not contain any text")
 
     @staticmethod
     def _fallback_answer(question: str, context: ContextPackage) -> str:

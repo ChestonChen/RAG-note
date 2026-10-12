@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Query
-from sqlalchemy import select
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
+from sqlalchemy import delete, select
 
 from .config import Settings, get_settings
 from .context import ContextBuilder, ContextPackage
@@ -17,7 +20,7 @@ from .db import get_engine, get_session_factory
 from .evaluation import EvaluationJudge
 from .generation import ChatGenerationService
 from .ingestion import IngestionService
-from .models import Conversation, QALog
+from .models import Conversation, Message, QALog
 from .retrieval import RetrievalService
 from .schemas import (
     AskRequest,
@@ -30,6 +33,10 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
     ConversationResponse,
+    ConversationCreate,
+    ConversationPatch,
+    ConversationStreamRequest,
+    ConversationSummary,
     MessageResponse,
 )
 from .web_search import WebSearchService
@@ -164,6 +171,230 @@ def create_app(
         if context.web_sources:
             return "本地知识库证据不足，联网搜索已返回资料，但当前未生成最终回答。"
         return "我无法从当前知识库中找到足够可靠的依据来回答这个问题。"
+
+    def _sse_event(name: str, payload: dict[str, Any]) -> str:
+        return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _touch_conversation(conversation: Conversation) -> None:
+        conversation.updated_at = datetime.now(timezone.utc)
+
+    @router.get("/v1/conversations", response_model=list[ConversationSummary])
+    def list_conversations() -> list[ConversationSummary]:
+        with session_factory() as session:
+            conversations = list(
+                session.scalars(
+                    select(Conversation)
+                    .where(Conversation.archived.is_(False))
+                    .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+                ).all()
+            )
+            return [ConversationSummary.model_validate(item) for item in conversations]
+
+    @router.post("/v1/conversations", response_model=ConversationResponse)
+    def create_conversation(request: ConversationCreate) -> ConversationResponse:
+        with session_factory() as session:
+            conversation = Conversation(title=request.title)
+            session.add(conversation)
+            session.commit()
+            session.refresh(conversation)
+            return serialize_conversation(conversation)
+
+    @router.get("/v1/conversations/{conversation_id}", response_model=ConversationResponse)
+    def get_conversation(conversation_id: int) -> ConversationResponse:
+        with session_factory() as session:
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            return serialize_conversation(conversation)
+
+    @router.patch("/v1/conversations/{conversation_id}", response_model=ConversationResponse)
+    def patch_conversation(conversation_id: int, request: ConversationPatch) -> ConversationResponse:
+        with session_factory() as session:
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            changed = False
+            if request.title is not None and request.title != conversation.title:
+                conversation.title = request.title
+                changed = True
+            if request.archived is not None and request.archived != conversation.archived:
+                conversation.archived = request.archived
+                changed = True
+            if changed:
+                _touch_conversation(conversation)
+            session.commit()
+            session.refresh(conversation)
+            return serialize_conversation(conversation)
+
+    @router.delete("/v1/conversations/{conversation_id}", status_code=204)
+    def delete_conversation(conversation_id: int) -> Response:
+        with session_factory() as session:
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            # Explicitly delete children so SQLite test databases behave like
+            # PostgreSQL even when foreign-key pragmas are not enabled.
+            session.execute(delete(Message).where(Message.conversation_id == conversation_id))
+            session.delete(conversation)
+            session.commit()
+        return Response(status_code=204)
+
+    @router.post("/v1/conversations/{conversation_id}/stream")
+    def stream_conversation(
+        conversation_id: int,
+        request: ConversationStreamRequest,
+    ) -> StreamingResponse:
+        # Validate the id before returning the lazy StreamingResponse so a
+        # missing conversation remains an ordinary HTTP 404 response.
+        with session_factory() as session:
+            if session.get(Conversation, conversation_id) is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+
+        def events():
+            user_message_id: int | None = None
+            started = time.perf_counter()
+            try:
+                with session_factory() as session:
+                    conversation = session.get(Conversation, conversation_id)
+                    if conversation is None:
+                        yield _sse_event("error", {"error": "conversation not found"})
+                        return
+                    user_message = Message(
+                        conversation_id=conversation_id,
+                        role="user",
+                        content=request.question,
+                        status="complete",
+                        mode="kb_only",
+                    )
+                    session.add(user_message)
+                    session.flush()
+                    user_message_id = user_message.id
+                    if conversation.title == "New conversation":
+                        conversation.title = request.question.strip()[:80] or conversation.title
+                    _touch_conversation(conversation)
+                    session.commit()
+
+                yield _sse_event(
+                    "message_start",
+                    {"user_message_id": user_message_id, "assistant_message_id": None},
+                )
+
+                hits = retrieval_service.search(request.question, settings.retrieval_context_limit)
+                context = context_builder.build(request.question, hits)
+                score = context.confidence_score
+                used_web_search = False
+                web_search_status: dict[str, Any] = {"status": "not_needed"}
+                if request.allow_web_fallback and (not hits or score < settings.web_fallback_score_threshold):
+                    web_result = web_search_service.search(request.question)
+                    web_search_status = {
+                        "status": getattr(web_result, "status", "unknown"),
+                        **({"reason": web_result.reason} if getattr(web_result, "reason", None) else {}),
+                        **({"error": web_result.error} if getattr(web_result, "error", None) else {}),
+                    }
+                    sources = getattr(web_result, "sources", []) or []
+                    if sources:
+                        context.web_sources = sources
+                        used_web_search = True
+
+                debug = _debug_payload(request.question, hits, context)
+                debug["web_search"] = web_search_status
+                should_generate = bool(hits and score >= settings.low_confidence_threshold) or used_web_search
+                confidence = "high" if score >= 0.65 else "medium"
+                mode = "kb_plus_web" if used_web_search and hits else "web_only" if used_web_search else "kb_only"
+                if not should_generate:
+                    answer = _answer_low_evidence(context)
+                    confidence = "low"
+                else:
+                    answer_parts: list[str] = []
+                    stream_method = getattr(generation_service, "stream", None)
+                    if stream_method is None:
+                        answer_parts.append(generation_service.generate(request.question, context))
+                    else:
+                        for fragment in stream_method(request.question, context):
+                            text = str(fragment)
+                            if text:
+                                answer_parts.append(text)
+                                yield _sse_event("token", {"text": text, "content": text})
+                    answer = "".join(answer_parts).strip()
+                    if not answer:
+                        raise RuntimeError("generation returned an empty answer")
+
+                if not should_generate:
+                    yield _sse_event("token", {"text": answer, "content": answer})
+
+                citations = [citation.model_dump() for citation in context.citations]
+                web_sources = [source.model_dump() for source in context.web_sources]
+                with session_factory() as session:
+                    conversation = session.get(Conversation, conversation_id)
+                    assistant = Message(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=answer,
+                        status="complete",
+                        citations=citations,
+                        retrieval_debug=debug,
+                        confidence=confidence,
+                        confidence_score=score,
+                        mode=mode,
+                        web_sources=web_sources,
+                    )
+                    session.add(assistant)
+                    if conversation is not None:
+                        _touch_conversation(conversation)
+                    session.commit()
+                    assistant_message_id = assistant.id
+
+                _persist_qa_log(
+                    question=request.question,
+                    answer=answer,
+                    confidence=confidence,
+                    confidence_score=score,
+                    context=context,
+                    retrieval_debug=debug,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+
+                metadata = {
+                    "assistant_message_id": assistant_message_id,
+                    "citations": citations,
+                    "confidence": confidence,
+                    "confidence_score": score,
+                    "retrieval_debug": debug,
+                    "mode": mode,
+                    "web_sources": web_sources,
+                    "used_web_search": used_web_search,
+                    "web_search_status": web_search_status,
+                }
+                yield _sse_event("metadata", metadata)
+                yield _sse_event(
+                    "complete",
+                    {"assistant_message_id": assistant_message_id, "answer": answer, **metadata},
+                )
+            except Exception:
+                logger.exception("conversation stream failed", extra={"conversation_id": conversation_id})
+                if user_message_id is not None:
+                    try:
+                        with session_factory() as session:
+                            user_message = session.get(Message, user_message_id)
+                            if user_message is not None:
+                                user_message.status = "error"
+                                user_message.error_message = "回答生成失败，可重试此问题。"
+                                conversation = session.get(Conversation, conversation_id)
+                                if conversation is not None:
+                                    _touch_conversation(conversation)
+                                session.commit()
+                    except Exception:
+                        logger.exception("failed to persist stream error", extra={"conversation_id": conversation_id})
+                yield _sse_event(
+                    "error",
+                    {
+                        "user_message_id": user_message_id,
+                        "error": "回答生成失败，可重试此问题。",
+                        "recoverable": True,
+                    },
+                )
+
+        return StreamingResponse(events(), media_type="text/event-stream")
 
     @router.get("/healthz", response_model=HealthResponse)
     def healthz() -> HealthResponse:

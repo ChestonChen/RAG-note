@@ -116,6 +116,11 @@ class ConversationPatch(BaseModel):
     archived: bool | None = None
 
 
+class ConversationStreamRequest(BaseModel):
+    question: str = Field(min_length=1)
+    allow_web_fallback: bool = True
+
+
 class MessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
