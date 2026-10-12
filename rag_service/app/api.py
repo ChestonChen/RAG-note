@@ -286,11 +286,20 @@ def create_app(
                 web_search_status: dict[str, Any] = {"status": "not_needed"}
                 if request.allow_web_fallback and (not hits or score < settings.web_fallback_score_threshold):
                     web_result = web_search_service.search(request.question)
-                    web_search_status = {
-                        "status": getattr(web_result, "status", "unknown"),
-                        **({"reason": web_result.reason} if getattr(web_result, "reason", None) else {}),
-                        **({"error": web_result.error} if getattr(web_result, "error", None) else {}),
+                    raw_status = str(getattr(web_result, "status", "error"))
+                    safe_statuses = {
+                        "ok",
+                        "disabled",
+                        "not_configured",
+                        "skipped",
+                        "timeout",
+                        "error",
+                        "unsupported",
                     }
+                    safe_status = raw_status if raw_status in safe_statuses else "error"
+                    web_search_status = {"status": safe_status}
+                    if safe_status == "error":
+                        web_search_status["reason"] = "web search unavailable"
                     sources = getattr(web_result, "sources", []) or []
                     if sources:
                         context.web_sources = sources

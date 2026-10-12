@@ -151,3 +151,36 @@ def test_generation_error_marks_user_message_and_emits_safe_error():
         assert messages[0].role == "user"
         assert messages[0].status == "error"
         assert messages[0].error_message
+
+
+def test_web_search_provider_error_is_not_exposed_in_stream_metadata_or_persistence():
+    provider_error = "provider-secret-error-with-sensitive-details"
+
+    class ErrorWebSearch:
+        def search(self, question):
+            return SimpleNamespace(
+                sources=[],
+                status="error",
+                reason="web search request failed",
+                error=provider_error,
+            )
+
+    client, sessions = _client([], web=ErrorWebSearch())
+    conversation_id = client.post("/v1/conversations", json={}).json()["id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/stream",
+        json={"question": "联网查询", "allow_web_fallback": True},
+    )
+
+    events = _events(response)
+    metadata = next(payload for name, payload in events if name == "metadata")
+    assert provider_error not in json.dumps(metadata, ensure_ascii=False)
+    with sessions() as session:
+        assistant = session.scalar(
+            select(Message).where(
+                Message.conversation_id == conversation_id,
+                Message.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert provider_error not in json.dumps(assistant.retrieval_debug, ensure_ascii=False)
