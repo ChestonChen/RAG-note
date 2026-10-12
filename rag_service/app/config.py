@@ -25,13 +25,15 @@ class Settings(BaseSettings):
         validation_alias="KNOWLEDGE_ROOT",
     )
 
-    embedding_provider: Literal["hashing", "openai_compatible"] = Field(
+    embedding_provider: Literal["hashing", "openai_compatible", "sentence_transformers"] = Field(
         default="hashing",
         validation_alias="EMBEDDING_PROVIDER",
     )
     embedding_base_url: str | None = Field(default=None, validation_alias="EMBEDDING_BASE_URL")
     embedding_api_key: str | None = Field(default=None, validation_alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(default="text-embedding-3-small", validation_alias="EMBEDDING_MODEL")
+    embedding_batch_size: int = Field(default=32, ge=1, validation_alias="EMBEDDING_BATCH_SIZE")
+    embedding_device: str = Field(default="cpu", min_length=1, validation_alias="EMBEDDING_DEVICE")
     # Hashing is the zero-credential smoke provider; real providers must set
     # this to the dimension returned by their configured model.
     embedding_dimensions: int = Field(default=384, ge=8, validation_alias="EMBEDDING_DIMENSIONS")

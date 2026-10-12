@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
+from pathlib import Path
 from typing import Any, Protocol
 
 from .config import Settings, get_settings
@@ -159,12 +161,120 @@ class OpenAICompatibleEmbeddingProvider:
         return vectors[0]
 
 
+class SentenceTransformersEmbeddingProvider:
+    """Local sentence-transformers embedding adapter.
+
+    The optional dependency and model are loaded only when the first batch is
+    embedded. Models are shared by path/device within the process so ingestion
+    and query handling do not each allocate a separate copy.
+    """
+
+    _model_cache: dict[tuple[str, str], Any] = {}
+    _model_lock = threading.Lock()
+
+    def __init__(
+        self,
+        *,
+        model_path: str,
+        dimensions: int | None = None,
+        batch_size: int = 32,
+        device: str = "cpu",
+    ) -> None:
+        if not model_path or not model_path.strip():
+            raise ValueError("a local sentence-transformers model path is required")
+        if batch_size < 1:
+            raise ValueError("embedding batch size must be at least 1")
+        if dimensions is not None and dimensions < 1:
+            raise ValueError("embedding dimensions must be positive")
+        if not device or not device.strip():
+            raise ValueError("embedding device must not be empty")
+        self.model_path = model_path
+        self.dimensions = dimensions
+        self.batch_size = batch_size
+        self.device = device
+
+    @property
+    def _cache_key(self) -> tuple[str, str]:
+        return (str(Path(self.model_path).expanduser().resolve()), self.device)
+
+    def _get_model(self) -> Any:
+        key = self._cache_key
+        with self._model_lock:
+            if key in self._model_cache:
+                return self._model_cache[key]
+            model_dir = Path(key[0])
+            if not model_dir.exists():
+                raise ValueError(f"sentence-transformers model path does not exist: {self.model_path}")
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:  # pragma: no cover - exercised with test injection
+                raise RuntimeError(
+                    "sentence-transformers is required for EMBEDDING_PROVIDER=sentence_transformers; "
+                    "install the sentence-transformers package"
+                ) from exc
+            try:
+                model = SentenceTransformer(str(model_dir), device=self.device)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to load sentence-transformers model from {self.model_path}: {exc}"
+                ) from exc
+            self._model_cache[key] = model
+            return model
+
+    @staticmethod
+    def _as_vectors(encoded: Any) -> list[list[float]]:
+        values = encoded.tolist() if hasattr(encoded, "tolist") else encoded
+        try:
+            return [
+                [float(value) for value in (row.tolist() if hasattr(row, "tolist") else row)]
+                for row in values
+            ]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("sentence-transformers returned invalid embedding vectors") from exc
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        if any(not isinstance(text, str) for text in texts):
+            raise TypeError("embedding input must contain only strings")
+        model = self._get_model()
+        try:
+            encoded = model.encode(
+                texts,
+                batch_size=self.batch_size,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"sentence-transformers failed to encode input: {exc}") from exc
+        vectors = self._as_vectors(encoded)
+        if len(vectors) != len(texts):
+            raise RuntimeError(
+                f"sentence-transformers returned {len(vectors)} vectors for {len(texts)} inputs"
+            )
+        if self.dimensions is not None and any(len(vector) != self.dimensions for vector in vectors):
+            raise RuntimeError("sentence-transformers returned an unexpected vector dimension")
+        return vectors
+
+    def embed_query(self, text: str) -> list[float]:
+        vectors = self.embed_texts([text])
+        return vectors[0]
+
+
 def create_embedding_provider(settings: Settings | None = None) -> EmbeddingProvider:
     """Build the configured provider, defaulting to local hashing embeddings."""
 
     settings = settings or get_settings()
     if settings.embedding_provider == "hashing":
         return HashingEmbeddingProvider(settings.embedding_dimensions)
+    if settings.embedding_provider == "sentence_transformers":
+        return SentenceTransformersEmbeddingProvider(
+            model_path=settings.embedding_model,
+            dimensions=settings.embedding_dimensions,
+            batch_size=settings.embedding_batch_size,
+            device=settings.embedding_device,
+        )
     if not settings.embedding_api_key:
         raise ValueError("EMBEDDING_API_KEY must be set when EMBEDDING_PROVIDER=openai_compatible")
     return OpenAICompatibleEmbeddingProvider(
@@ -188,6 +298,7 @@ __all__ = [
     "HashingEmbeddingProvider",
     "HashEmbeddingProvider",
     "OpenAICompatibleEmbeddingProvider",
+    "SentenceTransformersEmbeddingProvider",
     "build_embedding_provider",
     "create_embedding_provider",
 ]
