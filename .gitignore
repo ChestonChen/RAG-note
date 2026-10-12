@@ -7,3 +7,4 @@ __pycache__/
 postgres_data/
 rag_service/log/
 rag_service/.coverage
+.superpowers/
