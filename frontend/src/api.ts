@@ -12,17 +12,34 @@ const API_PREFIX = "/api";
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_PREFIX}${path}`, init);
   if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      // Keep the HTTP status when the server did not return JSON.
-    }
-    throw new Error(detail);
+    throw formatApiError(response.status, response.statusText, await response.text());
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+/** Convert any FastAPI/plain-text error body into a useful browser error. */
+export function formatApiError(status: number, statusText: string, body: string): Error {
+  const fallback = `${status}${statusText ? ` ${statusText}` : ""}`;
+  const raw = body.trim();
+  if (!raw) return new Error(fallback);
+  try {
+    const payload: unknown = JSON.parse(raw);
+    if (typeof payload === "string") return new Error(payload);
+    if (payload && typeof payload === "object" && "detail" in payload) {
+      const detail = (payload as { detail: unknown }).detail;
+      if (typeof detail === "string") return new Error(detail);
+      if (detail !== undefined) return new Error(JSON.stringify(detail));
+    }
+    if (payload && typeof payload === "object" && "message" in payload) {
+      const message = (payload as { message: unknown }).message;
+      if (typeof message === "string") return new Error(message);
+      if (message !== undefined) return new Error(JSON.stringify(message));
+    }
+  } catch {
+    // Keep a plain-text response as-is.
+  }
+  return new Error(raw || fallback);
 }
 
 export function listConversations(): Promise<ConversationSummary[]> {
@@ -76,7 +93,6 @@ export function createSseParser(
   };
 
   const consumeLine = (line: string) => {
-    line = line.trimStart();
     if (line === "") {
       dispatch();
       return;
@@ -92,10 +108,23 @@ export function createSseParser(
 
   return {
     push(chunk: string) {
-      buffer += chunk.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      lines.forEach(consumeLine);
+      buffer += chunk;
+      while (true) {
+        const lf = buffer.indexOf("\n");
+        const cr = buffer.indexOf("\r");
+        let end = -1;
+        let width = 1;
+        if (lf >= 0 && (cr < 0 || lf < cr)) end = lf;
+        else if (cr >= 0) {
+          // A CR at the end of a transport chunk may be the first half of CRLF.
+          if (cr === buffer.length - 1) break;
+          end = cr;
+          width = buffer[cr + 1] === "\n" ? 2 : 1;
+        }
+        if (end < 0) break;
+        consumeLine(buffer.slice(0, end));
+        buffer = buffer.slice(end + width);
+      }
     },
     finish() {
       if (buffer) consumeLine(buffer);
@@ -118,14 +147,7 @@ export async function sendMessageStream(
     signal,
   });
   if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      // Keep the HTTP status when the server did not return JSON.
-    }
-    throw new Error(detail);
+    throw formatApiError(response.status, response.statusText, await response.text());
   }
   if (!response.body) throw new Error("The server did not return a stream");
   const decoder = new TextDecoder();

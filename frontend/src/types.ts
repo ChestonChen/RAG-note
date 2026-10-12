@@ -81,16 +81,18 @@ export interface StreamEventMap {
   message_start: { user_message_id: number; assistant_message_id: number | null };
   token: { text?: string; content?: string };
   metadata: {
+    assistant_message_id: number;
     citations: Citation[];
     confidence: string;
     confidence_score: number;
     retrieval_debug: Record<string, unknown>;
     mode: string;
     web_sources: Array<{ title: string; url: string; snippet?: string | null }>;
+    used_web_search?: boolean;
+    web_search_status?: Record<string, unknown>;
   };
-  complete: { assistant_message_id: number; answer: string };
-  error: { error: string; user_message_id?: number };
+  complete: StreamEventMap["metadata"] & { assistant_message_id: number; answer: string };
+  error: { error: string; user_message_id: number | null; recoverable?: boolean };
 }
 
 export type StreamEventName = keyof StreamEventMap;
-
