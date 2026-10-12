@@ -263,6 +263,7 @@ def test_file_serving_stays_inside_knowledge_root(tmp_path):
 
     assert safe.status_code == 200
     assert safe.text == "safe"
+    assert safe.headers["content-disposition"].startswith("inline;")
     assert escaped.status_code == 404
 
 

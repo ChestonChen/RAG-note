@@ -614,7 +614,11 @@ def create_app(
             if document is None:
                 raise HTTPException(status_code=404, detail="document not found")
             source = _resolved_source(document)
-            return FileResponse(source, filename=source.name)
+            return FileResponse(
+                source,
+                filename=source.name,
+                content_disposition_type="inline",
+            )
 
     @router.post("/v1/retrieval/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:

@@ -2,12 +2,13 @@
 
 这是一个 API-first 的最小 RAG 知识库。它把 `knowledge/` 下的 Markdown/PDF 作为原始资料，解析并切片后写入 PostgreSQL + pgvector，同时保留来源、标题、页码和检索分数。查询时融合向量检索与关键词检索，再把带 `[DOC-n]` 引用的上下文交给可配置的 OpenAI-compatible LLM（默认可对接 DeepSeek）。证据不足时可以选择联网搜索，并把问答、检索调试和评测结果写入数据库。
 
-当前版本刻意不包含网页界面、MCP、OCR、reranker 和多用户权限，重点是让完整的“解析 → 切片 → embedding → 检索 → 引用 → 回答 → 评测”链路可观察、可调用。
+当前版本包含一个浏览器工作区：左侧管理会话，中间进行流式对话，右侧查看引用和检索命中，另有知识库页面用于上传与入库。MCP、OCR、reranker 和多用户权限仍未加入，重点是让完整的“解析 → 切片 → embedding → 检索 → 引用 → 回答 → 评测”链路可观察、可调用。
 
 ## 目录
 
 ```text
 knowledge/              原始 Markdown/PDF（数据库可从这里重建）
+frontend/               React + Vite 浏览器工作区
 rag_service/app/        配置、解析、切片、入库、检索、上下文和 API
 rag_service/tests/      单元测试（无 Docker 也能运行）
 scripts/init_db.py      创建 pgvector/pg_trgm 扩展和表
@@ -39,7 +40,18 @@ docker-compose.yml      本机 PostgreSQL + pgvector
    .\.venv\Scripts\python.exe -m uvicorn rag_service.app.main:app --reload --port 8000
    ```
 
-4. 填充索引并查询：
+4. 在另一个终端启动浏览器工作区：
+
+   ```powershell
+   cd frontend
+   .\node_modules\.bin\vite.cmd --host 127.0.0.1 --port 5173
+   ```
+
+   然后打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。Vite 会把 `/api` 请求转发到本机 FastAPI，API key 不会进入浏览器。
+
+   使用流程：先点左下角 `Knowledge base`，上传 Markdown/PDF，点击 `Ingest files`；回到新建会话后提问。点击回答可以查看来源、分数、命中的 chunk 和联网回退状态。
+
+5. 也可以直接用 API 填充索引并查询：
 
    ```powershell
    Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/ingest -ContentType 'application/json' -Body '{"force":false}'
@@ -65,7 +77,17 @@ LLM_API_KEY=your-deepseek-key
 LLM_MODEL=deepseek-chat
 ```
 
-密钥只放在 `.env`，不要提交。远端调用设置了超时；当前 MVP 没有后台队列，`/v1/ingest` 是同步接口，资料量很大时应再加任务队列。
+例如使用 AirCode 的 OpenAI-compatible 接口时，将回答模型改成：
+
+```dotenv
+LLM_BASE_URL=https://api.aircode.xin/v1
+LLM_API_KEY=your-aircode-key
+LLM_MODEL=gpt-5.6-sol
+```
+
+密钥只放在后端项目根目录的 `.env`，不要提交，也不要写入 `frontend/`。远端调用设置了超时；当前 MVP 没有后台队列，`/v1/ingest` 是同步接口，资料量很大时应再加任务队列。
+
+本地浏览器工作区默认不需要管理密钥。若配置 `ADMIN_API_KEY`，知识库管理接口会要求 `X-Admin-API-Key`；当前 UI 尚无管理密钥输入界面，因此本地使用 UI 时请保持该项为空，不要把管理密钥放进 `VITE_*` 前端变量。
 
 ### 联网回退与管理接口
 
