@@ -85,7 +85,7 @@ Content-Type: application/json
 不需要数据库即可运行单元测试：
 
 ```powershell
-\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## 离线检索评估
@@ -93,7 +93,7 @@ Content-Type: application/json
 使用内置 Markdown fixtures 在临时 SQLite 索引中运行离线评估（不会删除或修改配置的 PostgreSQL 索引）：
 
 ```powershell
-\.venv\Scripts\python.exe scripts/evaluate_retrieval.py --isolated
+.\.venv\Scripts\python.exe scripts/evaluate_retrieval.py --isolated
 ```
 
 报告写入 `reports/retrieval_eval.json`，包含 Hit@K、MRR、来源召回、引用覆盖率和未知问题误报率。评估使用确定性的 hashing embedding，仅用于验证解析、入库、检索和引用统计这条 pipeline 的基线；它不代表真实语义模型的检索质量。

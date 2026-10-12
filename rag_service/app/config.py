@@ -70,7 +70,13 @@ class Settings(BaseSettings):
         return f"{self.embedding_provider}:{self.embedding_model}:dim={self.embedding_dimensions}"
 
     def chunking_signature(self) -> str:
-        return f"{self.parser_version}:{self.chunking_version}:max={self.chunk_max_tokens}:overlap={self.chunk_overlap_tokens}"
+        # Keep the user-configured version while invalidating indexes produced
+        # before section/page-aware chunk boundaries were introduced.
+        implementation_version = "section-aware-v2"
+        return (
+            f"{self.parser_version}:{self.chunking_version}:{implementation_version}"
+            f":max={self.chunk_max_tokens}:overlap={self.chunk_overlap_tokens}"
+        )
 
 
 @lru_cache(maxsize=1)
