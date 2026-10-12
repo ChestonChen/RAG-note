@@ -21,6 +21,10 @@ class FakeEmbeddingProvider:
         return self.embed_texts([text])[0]
 
 
+class RecordingEmbeddingProvider(FakeEmbeddingProvider):
+    pass
+
+
 def _service(tmp_path, parser=None, chunker=None):
     knowledge = tmp_path / "knowledge"
     knowledge.mkdir()
@@ -102,3 +106,30 @@ def test_one_failed_file_does_not_stop_other_files(tmp_path):
         statuses = {document.source_path: document.status for document in session.query(Document).all()}
         assert statuses == {"bad.md": "failed", "good.md": "ready"}
         assert session.query(Chunk).count() == 1
+
+
+def test_embedding_receives_heading_context_but_chunk_content_stays_body(tmp_path):
+    provider = RecordingEmbeddingProvider()
+    payload = SimpleNamespace(
+        content="Body text.",
+        heading_path=["Guide", "Setup"],
+        token_count=2,
+        page_from=None,
+        page_to=None,
+    )
+    knowledge, service, factory = _service(
+        tmp_path,
+        chunker=lambda document, settings: [payload],
+    )
+    service.embedding_provider = provider
+    source = knowledge / "note.md"
+    source.write_text("body", encoding="utf-8")
+
+    summary = service.scan()
+
+    assert summary.processed_files == 1
+    assert provider.calls == [["Guide > Setup\n\nBody text."]]
+    with factory() as session:
+        chunk = session.query(Chunk).one()
+        assert chunk.content == "Body text."
+        assert chunk.heading_path == ["Guide", "Setup"]

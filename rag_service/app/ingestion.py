@@ -328,7 +328,12 @@ class IngestionService:
                         for item in payloads
                         if str(_value(item, "content", "text", default="") or "").strip()
                     ]
-                    texts = [str(_value(item, "content", "text", default="") or "") for item in payloads]
+                    texts = []
+                    for item in payloads:
+                        content = str(_value(item, "content", "text", default="") or "")
+                        heading_path = _heading_path(item)
+                        heading_context = " > ".join(heading_path)
+                        texts.append(f"{heading_context}\n\n{content}" if heading_context else content)
                     vectors = self.embedding_provider.embed_texts(texts) if texts else []
                     if len(vectors) != len(payloads):
                         raise RuntimeError(

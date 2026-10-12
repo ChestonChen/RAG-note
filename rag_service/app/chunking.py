@@ -109,7 +109,7 @@ def chunk_document(document: ParsedDocument, settings: Settings) -> list[ChunkPa
     def render(parts: list[str]) -> str:
         return "\n\n".join(part for part in parts if part)
 
-    def flush() -> None:
+    def flush(*, reset_overlap: bool = False) -> None:
         nonlocal current_parts, current_segments, previous_content
         if not current_parts or not current_segments:
             current_parts = []
@@ -127,7 +127,7 @@ def chunk_document(document: ParsedDocument, settings: Settings) -> list[ChunkPa
             tokenizer=tokenizer,
         )
         chunks.append(chunk)
-        previous_content = content
+        previous_content = "" if reset_overlap else content
         current_parts = []
         current_segments = []
 
@@ -157,9 +157,24 @@ def chunk_document(document: ParsedDocument, settings: Settings) -> list[ChunkPa
         current_parts = [part for part in (overlap_text, segment.text) if part]
         current_segments = [segment]
 
+    previous_segment: _Segment | None = None
     for segment in segments:
+        # Heading blocks are metadata boundaries only.  They are retained by
+        # the parser for source structure, but never become body evidence.
+        if segment.block_type == "heading":
+            flush(reset_overlap=True)
+            previous_segment = None
+            continue
+
+        if previous_segment is not None and (
+            segment.heading_path != previous_segment.heading_path
+            or segment.page_number != previous_segment.page_number
+        ):
+            flush(reset_overlap=True)
+
         if not current_segments:
             start_with_segment(segment)
+            previous_segment = segment
             continue
 
         candidate = render([*current_parts, segment.text])
@@ -170,6 +185,7 @@ def chunk_document(document: ParsedDocument, settings: Settings) -> list[ChunkPa
 
         flush()
         start_with_segment(segment)
+        previous_segment = segment
 
     flush()
     return chunks

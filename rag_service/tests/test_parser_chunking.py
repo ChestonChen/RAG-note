@@ -117,12 +117,15 @@ def test_chunking_preserves_heading_and_page_range():
     settings = Settings(chunk_max_tokens=100, chunk_overlap_tokens=0)
     chunks = chunk_document(document, settings)
 
-    assert len(chunks) == 1
-    assert chunks[0].heading_path == ["Guide", "Details"]
-    assert chunks[0].page_from == 2
-    assert chunks[0].page_to == 2
-    assert chunks[0].chunk_index == 0
-    assert chunks[0].token_count > 0
+    assert len(chunks) == 2
+    assert chunks[0].heading_path == ["Guide", "Intro"]
+    assert chunks[0].page_from is None
+    assert chunks[0].page_to is None
+    assert chunks[1].heading_path == ["Guide", "Details"]
+    assert chunks[1].page_from == 2
+    assert chunks[1].page_to == 2
+    assert [chunk.chunk_index for chunk in chunks] == [0, 1]
+    assert all(chunk.token_count > 0 for chunk in chunks)
     assert "introduction" in chunks[0].content
 
 
@@ -170,3 +173,27 @@ def test_chunking_rejects_invalid_budget():
 
     with pytest.raises(ValueError, match="chunk_max_tokens"):
         chunk_document(document, InvalidSettings())
+
+
+def test_heading_blocks_define_boundaries_without_becoming_body_evidence(tmp_path: Path):
+    source = tmp_path / "sections.md"
+    source.write_text(
+        "# Guide\n\n"
+        "Intro body.\n\n"
+        "## Setup\n\n"
+        "Setup body.\n\n"
+        "## Usage\n\n"
+        "Usage body.\n",
+        encoding="utf-8",
+    )
+
+    document = parse_file(source)
+    chunks = chunk_document(document, Settings(chunk_max_tokens=100, chunk_overlap_tokens=0))
+
+    assert [chunk.heading_path for chunk in chunks] == [
+        ["Guide"],
+        ["Guide", "Setup"],
+        ["Guide", "Usage"],
+    ]
+    assert [chunk.content for chunk in chunks] == ["Intro body.", "Setup body.", "Usage body."]
+    assert all("Guide" != chunk.content for chunk in chunks)
