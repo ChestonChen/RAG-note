@@ -148,6 +148,49 @@ class QALog(TimestampMixin, Base):
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class Conversation(TimestampMixin, Base):
+    """A persistent chat conversation and its message timeline."""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(512), default="New conversation", nullable=False)
+    archived: Mapped[bool] = mapped_column(default=False, index=True, nullable=False)
+
+    messages: Mapped[list["Message"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="(Message.created_at, Message.id)",
+    )
+
+
+class Message(Base):
+    """One user or assistant message persisted in a conversation."""
+
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="complete", nullable=False)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    retrieval_debug: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mode: Mapped[str] = mapped_column(String(32), default="kb_only", nullable=False)
+    web_sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
 def configure_embedding_dimensions(dimensions: int) -> None:
     """Set the pgvector column dimension before creating the schema.
 
@@ -171,5 +214,7 @@ __all__ = [
     "EmbeddingType",
     "configure_embedding_dimensions",
     "IngestionJob",
+    "Conversation",
+    "Message",
     "QALog",
 ]

@@ -17,7 +17,7 @@ from .db import get_engine, get_session_factory
 from .evaluation import EvaluationJudge
 from .generation import ChatGenerationService
 from .ingestion import IngestionService
-from .models import QALog
+from .models import Conversation, QALog
 from .retrieval import RetrievalService
 from .schemas import (
     AskRequest,
@@ -29,10 +29,40 @@ from .schemas import (
     IngestResponse,
     SearchRequest,
     SearchResponse,
+    ConversationResponse,
+    MessageResponse,
 )
 from .web_search import WebSearchService
 
 logger = logging.getLogger(__name__)
+
+
+def serialize_message(message: Any) -> MessageResponse:
+    """Serialize a persisted message using its complete response contract."""
+
+    return MessageResponse.model_validate(message)
+
+
+def serialize_conversation(conversation: Conversation) -> ConversationResponse:
+    """Serialize a conversation with messages in stable chronological order."""
+
+    messages = sorted(
+        conversation.messages,
+        key=lambda message: (
+            message.created_at is None,
+            message.created_at,
+            message.id,
+        ),
+    )
+    payload = {
+        "id": conversation.id,
+        "title": conversation.title,
+        "archived": conversation.archived,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "messages": [serialize_message(message) for message in messages],
+    }
+    return ConversationResponse.model_validate(payload)
 
 
 def _summary_value(summary: Any, name: str, default: int = 0) -> int:

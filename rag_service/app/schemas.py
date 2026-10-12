@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SourceCitation(BaseModel):
@@ -104,3 +105,44 @@ class HealthResponse(BaseModel):
     web_search_enabled: bool = False
     web_search_configured: bool = False
     admin_configured: bool = False
+
+
+class ConversationCreate(BaseModel):
+    title: str = Field(default="New conversation", min_length=1, max_length=512)
+
+
+class ConversationPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    archived: bool | None = None
+
+
+class MessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    conversation_id: int
+    role: str
+    content: str
+    status: str
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    retrieval_debug: dict[str, Any] = Field(default_factory=dict)
+    confidence: str | None = None
+    confidence_score: float | None = None
+    mode: str
+    web_sources: list[dict[str, Any]] = Field(default_factory=list)
+    error_message: str | None = None
+    created_at: datetime
+
+
+class ConversationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    archived: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationResponse(ConversationSummary):
+    messages: list[MessageResponse] = Field(default_factory=list)
