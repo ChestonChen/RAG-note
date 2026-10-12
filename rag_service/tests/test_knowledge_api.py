@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -141,6 +142,29 @@ def test_concurrent_same_name_uploads_reserve_distinct_destinations(tmp_path):
     paths = [settings.resolved_knowledge_root() / response.json()["source_path"] for response in responses]
     assert len({path.name for path in paths}) == 2
     assert {path.read_bytes() for path in paths} == {b"one", b"two"}
+
+
+def test_upload_temp_file_is_not_an_ingestion_candidate(tmp_path):
+    _, _, app = _app(tmp_path)
+    captured_sources = []
+    import rag_service.app.api as api_module
+
+    original_replace = api_module.os.replace
+
+    def capture_replace(source, destination):
+        captured_sources.append(source)
+        return original_replace(source, destination)
+
+    with patch.object(api_module.os, "replace", side_effect=capture_replace):
+        response = TestClient(app).post(
+            "/v1/knowledge/upload",
+            files={"file": ("scan-safe.md", b"safe", "text/markdown")},
+        )
+
+    assert response.status_code == 201
+    assert captured_sources
+    assert captured_sources[0].suffix == ".uploadtmp"
+    assert captured_sources[0].suffix not in {".md", ".markdown", ".pdf"}
 
 
 def test_upload_rejects_files_over_configured_limit(tmp_path):

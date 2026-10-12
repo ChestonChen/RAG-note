@@ -539,7 +539,9 @@ def create_app(
         temporary_path: Path | None = None
         size = 0
         try:
-            with tempfile.NamedTemporaryFile(dir=root, prefix=".upload-", suffix=suffix, delete=False) as handle:
+            # Keep the temporary file invisible to ingestion's supported suffix scan
+            # until the atomic replacement publishes the final destination.
+            with tempfile.NamedTemporaryFile(dir=root, prefix=".upload-", suffix=".uploadtmp", delete=False) as handle:
                 temporary_path = Path(handle.name)
                 while chunk := file.file.read(1024 * 1024):
                     size += len(chunk)
