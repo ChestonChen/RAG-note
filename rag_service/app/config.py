@@ -63,6 +63,11 @@ class Settings(BaseSettings):
         default=60.0, gt=0, validation_alias="EVAL_JUDGE_TIMEOUT_SECONDS"
     )
     admin_api_key: str | None = Field(default=None, validation_alias="ADMIN_API_KEY")
+    knowledge_upload_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1,
+        validation_alias="KNOWLEDGE_UPLOAD_MAX_BYTES",
+    )
 
     chunk_max_tokens: int = Field(default=520, ge=64, validation_alias="CHUNK_MAX_TOKENS")
     chunk_overlap_tokens: int = Field(default=80, ge=0, validation_alias="CHUNK_OVERLAP_TOKENS")

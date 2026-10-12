@@ -54,6 +54,24 @@ class IngestResponse(BaseModel):
     chunk_count: int
 
 
+class KnowledgeDocumentResponse(BaseModel):
+    id: int
+    source_path: str
+    title: str
+    type: str
+    status: str
+    chunk_count: int
+    updated_at: datetime
+    error_message: str | None = None
+
+
+class KnowledgeUploadResponse(BaseModel):
+    source_path: str
+    filename: str
+    size: int
+    status: str = "uploaded"
+
+
 class SearchRequest(BaseModel):
     question: str = Field(min_length=1)
     limit: int | None = Field(default=None, ge=1, le=30)

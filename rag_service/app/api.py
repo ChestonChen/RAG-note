@@ -5,14 +5,16 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Response
-from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, select
+from fastapi import APIRouter, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import delete, func, select
 
 from .config import Settings, get_settings
 from .context import ContextBuilder, ContextPackage
@@ -20,7 +22,7 @@ from .db import get_engine, get_session_factory
 from .evaluation import EvaluationJudge
 from .generation import ChatGenerationService
 from .ingestion import IngestionService
-from .models import Conversation, Message, QALog
+from .models import Chunk, Conversation, Document, Message, QALog
 from .retrieval import RetrievalService
 from .schemas import (
     AskRequest,
@@ -38,6 +40,8 @@ from .schemas import (
     ConversationStreamRequest,
     ConversationSummary,
     MessageResponse,
+    KnowledgeDocumentResponse,
+    KnowledgeUploadResponse,
 )
 from .web_search import WebSearchService
 
@@ -177,6 +181,29 @@ def create_app(
 
     def _touch_conversation(conversation: Conversation) -> None:
         conversation.updated_at = datetime.now(timezone.utc)
+
+    def _ingest_response(summary: Any) -> IngestResponse:
+        return IngestResponse(
+            scanned_files=_summary_value(summary, "scanned_files"),
+            processed_files=_summary_value(summary, "processed_files"),
+            skipped_files=_summary_value(summary, "skipped_files"),
+            failed_files=_summary_value(summary, "failed_files"),
+            deleted_documents=_summary_value(summary, "deleted_documents"),
+            chunk_count=_summary_value(summary, "chunk_count"),
+        )
+
+    def _resolved_source(document: Document) -> Path:
+        """Resolve an indexed source and reject paths escaping the root."""
+
+        root = settings.resolved_knowledge_root().resolve()
+        candidate = (root / document.source_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="document file not found") from exc
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="document file not found")
+        return candidate
 
     @router.get("/v1/conversations", response_model=list[ConversationSummary])
     def list_conversations() -> list[ConversationSummary]:
@@ -439,14 +466,113 @@ def create_app(
             summary = ingestion_service.scan(force=request.force)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
-        return IngestResponse(
-            scanned_files=_summary_value(summary, "scanned_files"),
-            processed_files=_summary_value(summary, "processed_files"),
-            skipped_files=_summary_value(summary, "skipped_files"),
-            failed_files=_summary_value(summary, "failed_files"),
-            deleted_documents=_summary_value(summary, "deleted_documents"),
-            chunk_count=_summary_value(summary, "chunk_count"),
-        )
+        return _ingest_response(summary)
+
+    @router.get("/v1/knowledge/documents", response_model=list[KnowledgeDocumentResponse])
+    def list_knowledge_documents(
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> list[KnowledgeDocumentResponse]:
+        _configured_admin_guard(x_admin_api_key)
+        with session_factory() as session:
+            rows = session.execute(
+                select(Document, func.count(Chunk.id).label("chunk_count"))
+                .outerjoin(Chunk, Chunk.document_id == Document.id)
+                .group_by(Document.id)
+                .order_by(Document.updated_at.desc(), Document.id.desc())
+            ).all()
+            return [
+                KnowledgeDocumentResponse(
+                    id=document.id,
+                    source_path=document.source_path,
+                    title=document.title,
+                    type=document.source_type,
+                    status=document.status,
+                    chunk_count=int(chunk_count or 0),
+                    updated_at=document.updated_at,
+                    error_message=document.error_message,
+                )
+                for document, chunk_count in rows
+            ]
+
+    @router.post("/v1/knowledge/upload", response_model=KnowledgeUploadResponse, status_code=201)
+    def upload_knowledge_document(
+        file: UploadFile = File(...),
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> KnowledgeUploadResponse:
+        _configured_admin_guard(x_admin_api_key)
+        filename = file.filename or ""
+        if (
+            not filename
+            or filename in {".", ".."}
+            or "/" in filename
+            or "\\" in filename
+            or Path(filename).name != filename
+        ):
+            raise HTTPException(status_code=400, detail="filename must be a safe basename")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in IngestionService.supported_suffixes:
+            raise HTTPException(status_code=400, detail="only Markdown and PDF files are supported")
+
+        root = settings.resolved_knowledge_root().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        size = 0
+        try:
+            with tempfile.NamedTemporaryFile(dir=root, prefix=".upload-", suffix=suffix, delete=False) as handle:
+                temporary_path = Path(handle.name)
+                while chunk := file.file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > settings.knowledge_upload_max_bytes:
+                        raise HTTPException(status_code=413, detail="uploaded file exceeds size limit")
+                    handle.write(chunk)
+
+            stem = Path(filename).stem
+            destination = root / filename
+            duplicate = 1
+            while destination.exists():
+                destination = root / f"{stem} ({duplicate}){suffix}"
+                duplicate += 1
+            destination = destination.resolve()
+            try:
+                destination.relative_to(root)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="filename must be a safe basename") from exc
+            os.replace(temporary_path, destination)
+            temporary_path = None
+            return KnowledgeUploadResponse(
+                source_path=destination.relative_to(root).as_posix(),
+                filename=destination.name,
+                size=size,
+            )
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            file.file.close()
+
+    @router.post("/v1/knowledge/ingest", response_model=IngestResponse)
+    def ingest_knowledge(
+        request: IngestRequest,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> IngestResponse:
+        _configured_admin_guard(x_admin_api_key)
+        try:
+            summary = ingestion_service.scan(force=request.force)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
+        return _ingest_response(summary)
+
+    @router.get("/v1/knowledge/documents/{document_id}/file")
+    def serve_knowledge_document(
+        document_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> FileResponse:
+        _configured_admin_guard(x_admin_api_key)
+        with session_factory() as session:
+            document = session.get(Document, document_id)
+            if document is None:
+                raise HTTPException(status_code=404, detail="document not found")
+            source = _resolved_source(document)
+            return FileResponse(source, filename=source.name)
 
     @router.post("/v1/retrieval/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:
@@ -555,14 +681,7 @@ def create_app(
             summary = ingestion_service.scan(force=request.force)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
-        return IngestResponse(
-            scanned_files=_summary_value(summary, "scanned_files"),
-            processed_files=_summary_value(summary, "processed_files"),
-            skipped_files=_summary_value(summary, "skipped_files"),
-            failed_files=_summary_value(summary, "failed_files"),
-            deleted_documents=_summary_value(summary, "deleted_documents"),
-            chunk_count=_summary_value(summary, "chunk_count"),
-        )
+        return _ingest_response(summary)
 
     @router.get("/v1/admin/qa-logs")
     def admin_qa_logs(
