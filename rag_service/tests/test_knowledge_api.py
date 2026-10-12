@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -117,6 +118,29 @@ def test_upload_rejects_unsupported_and_path_like_filenames(tmp_path):
         "/v1/knowledge/upload",
         files={"file": ("sub\\escape.md", b"no", "text/markdown")},
     ).status_code == 400
+    for filename in ("foo:bar.md", "CON.md", "name.md ", "name.md."):
+        assert client.post(
+            "/v1/knowledge/upload",
+            files={"file": (filename, b"no", "text/markdown")},
+        ).status_code == 400
+
+
+def test_concurrent_same_name_uploads_reserve_distinct_destinations(tmp_path):
+    settings, _, app = _app(tmp_path)
+
+    def upload(content):
+        return TestClient(app).post(
+            "/v1/knowledge/upload",
+            files={"file": ("race.md", content, "text/markdown")},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(upload, (b"one", b"two")))
+
+    assert [response.status_code for response in responses] == [201, 201]
+    paths = [settings.resolved_knowledge_root() / response.json()["source_path"] for response in responses]
+    assert len({path.name for path in paths}) == 2
+    assert {path.read_bytes() for path in paths} == {b"one", b"two"}
 
 
 def test_upload_rejects_files_over_configured_limit(tmp_path):
@@ -217,4 +241,3 @@ def test_knowledge_routes_use_configured_admin_guard(tmp_path):
         files={"file": ("guide.md", b"safe", "text/markdown")},
     ).status_code == 401
     assert client.get("/v1/knowledge/documents/1/file").status_code == 401
-

@@ -47,6 +47,33 @@ from .web_search import WebSearchService
 
 logger = logging.getLogger(__name__)
 
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def _is_safe_upload_basename(filename: str) -> bool:
+    """Reject names that are unsafe or cannot be represented on Windows."""
+
+    if (
+        not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or Path(filename).name != filename
+        or any(ord(character) < 32 for character in filename)
+        or any(character in '<>:"|?*' for character in filename)
+        or filename[-1] in {".", " "}
+    ):
+        return False
+    stem = Path(filename).stem.rstrip(" .").upper()
+    return stem not in _WINDOWS_RESERVED_NAMES
+
 
 def serialize_message(message: Any) -> MessageResponse:
     """Serialize a persisted message using its complete response contract."""
@@ -501,13 +528,7 @@ def create_app(
     ) -> KnowledgeUploadResponse:
         _configured_admin_guard(x_admin_api_key)
         filename = file.filename or ""
-        if (
-            not filename
-            or filename in {".", ".."}
-            or "/" in filename
-            or "\\" in filename
-            or Path(filename).name != filename
-        ):
+        if not _is_safe_upload_basename(filename):
             raise HTTPException(status_code=400, detail="filename must be a safe basename")
         suffix = Path(filename).suffix.lower()
         if suffix not in IngestionService.supported_suffixes:
@@ -527,18 +548,30 @@ def create_app(
                     handle.write(chunk)
 
             stem = Path(filename).stem
-            destination = root / filename
-            duplicate = 1
-            while destination.exists():
-                destination = root / f"{stem} ({duplicate}){suffix}"
-                duplicate += 1
-            destination = destination.resolve()
-            try:
-                destination.relative_to(root)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail="filename must be a safe basename") from exc
-            os.replace(temporary_path, destination)
-            temporary_path = None
+            duplicate = 0
+            while True:
+                candidate_name = filename if duplicate == 0 else f"{stem} ({duplicate}){suffix}"
+                destination = (root / candidate_name).resolve()
+                try:
+                    destination.relative_to(root)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="filename must be a safe basename") from exc
+                try:
+                    reservation = os.open(
+                        destination,
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    )
+                except FileExistsError:
+                    duplicate += 1
+                    continue
+                os.close(reservation)
+                try:
+                    os.replace(temporary_path, destination)
+                    temporary_path = None
+                except Exception:
+                    destination.unlink(missing_ok=True)
+                    raise
+                break
             return KnowledgeUploadResponse(
                 source_path=destination.relative_to(root).as_posix(),
                 filename=destination.name,
