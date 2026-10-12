@@ -66,6 +66,70 @@ def test_retrieval_matches_technical_identifiers_and_chinese_ngrams_in_metadata(
     assert any(term in hits[0].matched_terms for term in ("向量", "向量索引"))
 
 
+def test_retrieval_prefers_exact_title_match_over_body_only_keyword_match():
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        retrieval_vector_candidates=3,
+        retrieval_keyword_candidates=3,
+        retrieval_phrase_candidates=3,
+        retrieval_context_limit=2,
+        retrieval_neighbor_window=0,
+    )
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    shared_vector = [0.0] * settings.embedding_dimensions
+    shared_vector[0] = 1.0
+    with factory() as session:
+        body_document = Document(
+            source_path="knowledge/vector.md",
+            source_type="markdown",
+            title="Vector reference",
+            file_hash="d" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        title_document = Document(
+            source_path="knowledge/stl.md",
+            source_type="markdown",
+            title="STL reference",
+            file_hash="e" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add_all([body_document, title_document])
+        session.flush()
+        session.add_all(
+            [
+                Chunk(
+                    document_id=body_document.id,
+                    chunk_index=0,
+                    content="This body mentions STL as an implementation detail.",
+                    heading_path=["Vector"],
+                    token_count=8,
+                    embedding=shared_vector,
+                ),
+                Chunk(
+                    document_id=title_document.id,
+                    chunk_index=0,
+                    content="The standard template library provides reusable components.",
+                    heading_path=["Overview"],
+                    token_count=8,
+                    embedding=shared_vector,
+                ),
+            ]
+        )
+        session.commit()
+
+    hits = RetrievalService(factory, settings=settings, embedding_provider=provider).search("STL 是什么")
+
+    assert hits[0].source == "knowledge/stl.md"
+
+
 def test_retrieval_reports_exact_phrase_score_and_primary_neighbor_metadata():
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",

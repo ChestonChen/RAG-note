@@ -15,11 +15,18 @@ SYSTEM_PROMPT = """你是一个严谨的知识库问答助手。
 
 
 def build_prompt(question: str, context: ContextPackage) -> str:
+    web_context = "\n".join(
+        f"[WEB-{index}] {source.title} | {source.url}\n{source.snippet or ''}".strip()
+        for index, source in enumerate(context.web_sources, start=1)
+    ) or "(没有联网补充资料)"
     return f"""QUESTION:
 {question.strip()}
 
 CONTEXT:
 {context.text or '(没有检索到证据)'}
+
+WEB SOURCES:
+{web_context}
 
 请严格遵守系统规则回答。"""
 
@@ -46,6 +53,8 @@ class ChatGenerationService:
         return self._client
 
     def generate(self, question: str, context: ContextPackage) -> str:
+        if not self.settings.llm_api_key:
+            return self._fallback_answer(question, context)
         response = self.client.chat.completions.create(
             model=self.settings.llm_model,
             temperature=0.1,
@@ -66,6 +75,27 @@ class ChatGenerationService:
         if not content:
             raise RuntimeError("LLM response contained an empty message")
         return str(content).strip()
+
+    @staticmethod
+    def _fallback_answer(question: str, context: ContextPackage) -> str:
+        if not context.hits and not context.web_sources:
+            return "当前未配置生成模型，且知识库与联网搜索都没有检索到相关资料。"
+        lines = [
+            "当前未配置生成模型，下面返回检索到的知识库摘要。",
+            f"问题：{question}",
+            "",
+            "检索到的资料：",
+        ]
+        for index, hit in enumerate(context.hits[:3], start=1):
+            location = hit.source
+            if hit.heading:
+                location += " > " + " > ".join(hit.heading)
+            lines.append(f"{index}. [{location}] {hit.content[:500].replace(chr(10), ' ')}")
+        if context.web_sources:
+            lines.append("\n联网补充资料：")
+            for index, source in enumerate(context.web_sources[:3], start=1):
+                lines.append(f"{index}. {source.title} - {source.url}")
+        return "\n".join(lines)
 
 
 __all__ = ["ChatGenerationService", "SYSTEM_PROMPT", "build_prompt"]

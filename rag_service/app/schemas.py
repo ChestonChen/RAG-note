@@ -15,6 +15,12 @@ class SourceCitation(BaseModel):
     citation_id: str
 
 
+class WebSource(BaseModel):
+    title: str
+    url: str
+    snippet: str | None = None
+
+
 class SearchHit(BaseModel):
     chunk_id: int
     content: str
@@ -61,6 +67,7 @@ class SearchResponse(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1)
+    allow_web_fallback: bool = True
 
 
 class AskResponse(BaseModel):
@@ -69,6 +76,23 @@ class AskResponse(BaseModel):
     confidence_score: float
     citations: list[SourceCitation]
     retrieval_debug: dict[str, Any]
+    mode: str = "kb_only"
+    used_web_search: bool = False
+    web_sources: list[WebSource] = Field(default_factory=list)
+    web_search_status: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvalJudgeRequest(BaseModel):
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+    context: str = ""
+
+
+class EvalRunRequest(BaseModel):
+    cases_path: str | None = None
+    limit: int = Field(default=5, ge=1, le=30)
+    generate_answers: bool = False
+    judge_with_ai: bool = False
 
 
 class HealthResponse(BaseModel):
@@ -77,3 +101,6 @@ class HealthResponse(BaseModel):
     knowledge_root: str
     embedding_provider: str
     llm_configured: bool
+    web_search_enabled: bool = False
+    web_search_configured: bool = False
+    admin_configured: bool = False

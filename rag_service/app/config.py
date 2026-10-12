@@ -43,6 +43,27 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="deepseek-chat", validation_alias="LLM_MODEL")
     llm_timeout_seconds: float = Field(default=60.0, gt=0, validation_alias="LLM_TIMEOUT_SECONDS")
 
+    web_search_enabled: bool = Field(default=False, validation_alias="WEB_SEARCH_ENABLED")
+    web_search_provider: Literal["none", "tavily", "proxy_gateway"] = Field(
+        default="none", validation_alias="WEB_SEARCH_PROVIDER"
+    )
+    tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
+    web_search_proxy_url: str | None = Field(default=None, validation_alias="WEB_SEARCH_PROXY_URL")
+    web_search_proxy_api_key: str | None = Field(default=None, validation_alias="WEB_SEARCH_PROXY_API_KEY")
+    web_search_max_results: int = Field(default=5, ge=1, le=20, validation_alias="WEB_SEARCH_MAX_RESULTS")
+    web_search_timeout_seconds: float = Field(default=20.0, gt=0, validation_alias="WEB_SEARCH_TIMEOUT_SECONDS")
+    web_fallback_score_threshold: float = Field(
+        default=0.28, ge=0, le=1, validation_alias="WEB_FALLBACK_SCORE_THRESHOLD"
+    )
+
+    eval_judge_base_url: str | None = Field(default=None, validation_alias="EVAL_JUDGE_BASE_URL")
+    eval_judge_api_key: str | None = Field(default=None, validation_alias="EVAL_JUDGE_API_KEY")
+    eval_judge_model: str | None = Field(default=None, validation_alias="EVAL_JUDGE_MODEL")
+    eval_judge_timeout_seconds: float = Field(
+        default=60.0, gt=0, validation_alias="EVAL_JUDGE_TIMEOUT_SECONDS"
+    )
+    admin_api_key: str | None = Field(default=None, validation_alias="ADMIN_API_KEY")
+
     chunk_max_tokens: int = Field(default=520, ge=64, validation_alias="CHUNK_MAX_TOKENS")
     chunk_overlap_tokens: int = Field(default=80, ge=0, validation_alias="CHUNK_OVERLAP_TOKENS")
     chunking_version: str = Field(default="chunk-v1", validation_alias="CHUNKING_VERSION")

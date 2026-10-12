@@ -300,7 +300,19 @@ class RetrievalService:
             channel_sets = {name: set(ids) for name, ids in channels.items()}
             ranked = sorted(
                 fused,
-                key=lambda chunk_id: (fused[chunk_id], candidates[chunk_id].vector_score),
+                # RRF remains the dominant signal. A small metadata prior
+                # resolves near ties in favor of an exact phrase and metadata
+                # hit, keeping a document titled with the queried concept
+                # ahead of an incidental body-only mention.
+                key=lambda chunk_id: (
+                    fused[chunk_id]
+                    + 0.01 * candidates[chunk_id].phrase_score
+                    + 0.005 * candidates[chunk_id].keyword_score,
+                    fused[chunk_id],
+                    candidates[chunk_id].phrase_score,
+                    candidates[chunk_id].keyword_score,
+                    candidates[chunk_id].vector_score,
+                ),
                 reverse=True,
             )
             self.latest_debug["fusion_order"] = list(ranked)

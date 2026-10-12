@@ -1,8 +1,8 @@
 # RAG Knowledge Base MVP
 
-这是一个 API-first 的最小 RAG 知识库。它把 `knowledge/` 下的 Markdown/PDF 作为原始资料，解析并切片后写入 PostgreSQL + pgvector，同时保留来源、标题、页码和检索分数。查询时融合向量检索与关键词检索，再把带 `[DOC-n]` 引用的上下文交给可配置的 OpenAI-compatible LLM。
+这是一个 API-first 的最小 RAG 知识库。它把 `knowledge/` 下的 Markdown/PDF 作为原始资料，解析并切片后写入 PostgreSQL + pgvector，同时保留来源、标题、页码和检索分数。查询时融合向量检索与关键词检索，再把带 `[DOC-n]` 引用的上下文交给可配置的 OpenAI-compatible LLM（默认可对接 DeepSeek）。证据不足时可以选择联网搜索，并把问答、检索调试和评测结果写入数据库。
 
-当前版本刻意不包含网页界面、MCP、OCR、reranker、联网搜索和多用户权限，重点是让完整的“解析 → 切片 → embedding → 检索 → 引用 → 回答”链路可观察、可调用。
+当前版本刻意不包含网页界面、MCP、OCR、reranker 和多用户权限，重点是让完整的“解析 → 切片 → embedding → 检索 → 引用 → 回答 → 评测”链路可观察、可调用。
 
 ## 目录
 
@@ -47,7 +47,7 @@ docker-compose.yml      本机 PostgreSQL + pgvector
    Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/qa/ask -ContentType 'application/json' -Body '{"question":"pgvector 是做什么的"}'
    ```
 
-`/v1/retrieval/debug` 会返回每个 chunk 的向量分数、关键词分数、RRF 分数、命中的通道和最终上下文，适合调切片与检索。没有足够证据时 `/v1/qa/ask` 会直接返回低证据结果，不调用 LLM。
+`/v1/retrieval/debug` 会返回每个 chunk 的向量分数、关键词分数、RRF 分数、命中的通道和最终上下文，适合调切片与检索。没有足够证据时 `/v1/qa/ask` 默认尝试联网回退；未配置联网搜索或仍然没有来源时，会返回低证据结果，不调用 LLM。问答结果会写入 `qa_logs`，日志写入失败不会阻断回答。
 
 ## 远端 API 配置
 
@@ -66,6 +66,26 @@ LLM_MODEL=deepseek-chat
 ```
 
 密钥只放在 `.env`，不要提交。远端调用设置了超时；当前 MVP 没有后台队列，`/v1/ingest` 是同步接口，资料量很大时应再加任务队列。
+
+### 联网回退与管理接口
+
+联网回退以 Tavily 为例：
+
+```dotenv
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=your-tavily-key
+```
+
+管理接口要求配置 `ADMIN_API_KEY`，并通过 `X-Admin-API-Key` 传递。未配置管理密钥时 `/v1/ingest` 兼容本地开发；一旦配置密钥，公开入库接口也会要求同一个请求头。生产环境建议直接使用受保护的管理接口：
+
+```powershell
+$headers = @{ 'X-Admin-API-Key' = 'replace-with-admin-key' }
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/admin/ingest -Headers $headers -ContentType 'application/json' -Body '{"force":false}'
+Invoke-RestMethod -Method Get http://127.0.0.1:8000/v1/admin/qa-logs -Headers $headers
+```
+
+`POST /v1/admin/eval/judge` 可以直接评测一个答案是否被上下文支持；`POST /v1/admin/eval/run` 运行 `eval/retrieval_cases.jsonl` 的检索评测，并可通过 `generate_answers`、`judge_with_ai` 开启答案生成和 AI judge。AI judge 未配置时会返回 `not_configured`，不会让检索评测失败。
 
 ## 给本地 Agent 的最小接口
 

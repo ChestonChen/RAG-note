@@ -217,6 +217,10 @@ def _parse_pdf(path: Path) -> ParsedDocument:
     blocks: list[ParsedBlock] = []
     for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
+        # Some PDF text extractors use ASCII control separators (for example
+        # ``\\x01``) between layout fragments. Treat them as line breaks so
+        # they cannot leak into citations or embedding input.
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+", "\n", text)
         text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not text:
             continue
@@ -224,6 +228,7 @@ def _parse_pdf(path: Path) -> ParsedDocument:
             ParsedBlock(
                 text=text,
                 block_type="page",
+                heading_path=[title],
                 page_number=page_number,
                 metadata={"page": page_number},
             )

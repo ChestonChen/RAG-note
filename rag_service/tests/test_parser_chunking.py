@@ -90,6 +90,25 @@ def test_pdf_parser_keeps_page_metadata(monkeypatch, tmp_path: Path):
     assert document.blocks[0].text == "Page one content"
 
 
+def test_pdf_parser_normalizes_extracted_control_separators(monkeypatch, tmp_path: Path):
+    class FakePage:
+        def extract_text(self):
+            return "Title\x01Line\x02Next"
+
+    class FakeReader:
+        metadata = {"/Title": "PDF title"}
+        pages = [FakePage()]
+
+    monkeypatch.setattr(parser_module, "PdfReader", lambda _: FakeReader())
+    source = tmp_path / "reference.pdf"
+    source.write_bytes(b"fixture")
+
+    document = parse_file(source)
+
+    assert document.blocks[0].heading_path == ["PDF title"]
+    assert document.blocks[0].text == "Title\nLine\nNext"
+
+
 def test_chunking_preserves_heading_and_page_range():
     document = ParsedDocument(
         title="Guide",

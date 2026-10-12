@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from .config import Settings, get_settings
-from .schemas import SearchHit, SourceCitation
+from .schemas import SearchHit, SourceCitation, WebSource
 
 
 def _rough_tokens(text: str) -> int:
@@ -21,6 +21,7 @@ class ContextPackage:
     citations: list[SourceCitation]
     hits: list[SearchHit]
     confidence_score: float
+    web_sources: list[WebSource] = field(default_factory=list)
 
 
 class ContextBuilder:
