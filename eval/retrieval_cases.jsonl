@@ -1,0 +1,6 @@
+{"id":"vector-identifier","question":"What does pgvector provide for cosine distance search?","relevant_sources":["01_vector_notes.md"],"relevant_headings":["pgvector"],"answerable":true}
+{"id":"vector-chinese","question":"向量检索如何用 embedding 找到相似文本？","relevant_sources":["01_vector_notes.md"],"relevant_headings":["Embeddings","Vector Search"],"answerable":true}
+{"id":"tcp-udp","question":"How does TCP differ from UDP?","relevant_sources":["02_network_notes.md"],"relevant_headings":["TCP Reliability","UDP Datagram Transport"],"answerable":true}
+{"id":"tcp-chinese","question":"TCP 如何保证可靠、有序的数据传输？","relevant_sources":["02_network_notes.md"],"relevant_headings":["TCP Reliability"],"answerable":true}
+{"id":"unknown-cache","question":"How does Redis cluster failover elect a new primary?","relevant_sources":[],"answerable":false}
+{"id":"unknown-kubernetes","question":"How do Kubernetes ingress controllers route traffic?","relevant_sources":[],"answerable":false}

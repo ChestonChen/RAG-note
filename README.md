@@ -88,4 +88,14 @@ Content-Type: application/json
 \.venv\Scripts\python.exe -m pytest -q
 ```
 
+## 离线检索评估
+
+使用内置 Markdown fixtures 在临时 SQLite 索引中运行离线评估（不会删除或修改配置的 PostgreSQL 索引）：
+
+```powershell
+\.venv\Scripts\python.exe scripts/evaluate_retrieval.py --isolated
+```
+
+报告写入 `reports/retrieval_eval.json`，包含 Hit@K、MRR、来源召回、引用覆盖率和未知问题误报率。评估使用确定性的 hashing embedding，仅用于验证解析、入库、检索和引用统计这条 pipeline 的基线；它不代表真实语义模型的检索质量。
+
 PostgreSQL 只在执行真实入库、向量检索和端到端流程时需要。数据库使用 Docker named volume 持久化，原文文件不会被写入数据库之外的隐式位置。
