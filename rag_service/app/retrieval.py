@@ -6,7 +6,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,41 +17,126 @@ from .models import Chunk, Document
 from .schemas import SearchHit
 
 
-def reciprocal_rank_fusion(channels: dict[str, list[int]], k: int = 60) -> dict[int, float]:
+def reciprocal_rank_fusion(
+    channels: dict[str, list[int]],
+    k: int = 60,
+    weights: Mapping[str, float] | None = None,
+) -> dict[int, float]:
     """Fuse ranked ids from independent channels using reciprocal rank fusion."""
 
     if k <= 0:
         raise ValueError("RRF k must be positive")
     scores: dict[int, float] = defaultdict(float)
-    for ranked_ids in channels.values():
+    weights = weights or {}
+    for channel_name, ranked_ids in channels.items():
+        weight = float(weights.get(channel_name, 1.0))
+        if weight <= 0:
+            continue
         seen: set[int] = set()
         for rank, item_id in enumerate(ranked_ids, start=1):
             if item_id in seen:
                 continue
             seen.add(item_id)
-            scores[item_id] += 1.0 / (k + rank)
+            scores[item_id] += weight / (k + rank)
     return dict(scores)
 
 
+_CHINESE_STOP_WORDS = {
+    "什么", "怎么", "如何", "为什么", "请问", "可以", "是否", "以及", "哪些", "这个", "那个",
+    "的", "了", "吗", "呢", "是", "有", "在", "和", "与", "或", "我", "你", "它", "能",
+}
+_ASCII_STOP_WORDS = {
+    "a", "an", "the", "and", "or", "for", "how", "what", "why", "does", "do", "is", "are",
+    "can", "please", "explain", "tell", "about", "of", "to", "in", "on",
+}
+
+
+def _ascii_identifiers(text: str) -> list[str]:
+    return [
+        match.casefold()
+        for match in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:[-+]+[A-Za-z0-9]*)*", text)
+        if match.casefold() not in _ASCII_STOP_WORDS
+    ]
+
+
+def _chinese_ngrams(text: str) -> list[str]:
+    terms: list[str] = []
+    for run in re.findall(r"[\u4e00-\u9fff]+", text):
+        # Remove filler words before forming n-grams so their boundary
+        # characters cannot create noisy terms such as ``么是``.
+        useful_runs = [part for part in re.split("|".join(map(re.escape, _CHINESE_STOP_WORDS)), run) if part]
+        for useful in useful_runs:
+            for size in (2, 3):
+                terms.extend(useful[index : index + size] for index in range(len(useful) - size + 1))
+    return terms
+
+
 def _terms(question: str) -> list[str]:
-    # Keep identifiers such as ``pgvector`` and Chinese runs intact while
-    # dropping punctuation that otherwise creates noisy substring matches.
-    return [term for term in re.findall(r"[\w\u4e00-\u9fff]+", question.casefold()) if term]
+    terms = _ascii_identifiers(question) + _chinese_ngrams(question.casefold())
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _core_phrase(question: str) -> str:
+    ascii_terms = _ascii_identifiers(question)
+    chinese = ""
+    for run in re.findall(r"[\u4e00-\u9fff]+", question):
+        cleaned = run
+        for stop_word in sorted(_CHINESE_STOP_WORDS, key=len, reverse=True):
+            cleaned = cleaned.replace(stop_word, " ")
+        chinese += "".join(cleaned.split())
+    return " ".join(ascii_terms + ([chinese] if chinese else []))
+
+
+def _keyword_details(question: str, document: Document, chunk: Chunk) -> tuple[float, list[str]]:
+    terms = _terms(question)
+    if not terms:
+        return 0.0, []
+    fields = (
+        (" ".join(chunk.heading_path or []), 2.8),
+        (document.title, 2.4),
+        (document.source_path, 1.8),
+        (chunk.content, 1.0),
+    )
+    matched: list[str] = []
+    weighted_hits = 0.0
+    total_weight = sum(weight for _, weight in fields)
+    for term in terms:
+        term_weight = max((weight for value, weight in fields if term in _normalized_text(value)), default=0.0)
+        if term_weight:
+            weighted_hits += term_weight
+            matched.append(term)
+    return min(1.0, weighted_hits / max(total_weight, 1.0) * 2.0), matched
+
+
+def _phrase_score(question: str, document: Document, chunk: Chunk) -> float:
+    query = _normalized_text(question)
+    if not query:
+        return 0.0
+    haystack = _normalized_text(
+        " ".join([document.title, document.source_path, " ".join(chunk.heading_path or []), chunk.content])
+    )
+    if query in haystack:
+        return 1.0
+    core = _normalized_text(_core_phrase(question))
+    if core and core in haystack:
+        return 0.7
+    return 0.0
 
 
 def _keyword_score(question: str, content: str) -> float:
-    query = " ".join(question.casefold().split())
-    haystack = " ".join(content.casefold().split())
-    if not query or not haystack:
-        return 0.0
+    # Kept as a small compatibility helper for callers that used the former
+    # body-only scorer; retrieval itself uses the metadata-aware scorer.
+    query = _normalized_text(question)
+    haystack = _normalized_text(content)
     terms = _terms(question)
-    if not terms:
+    if not query or not haystack or not terms:
         return 0.0
-    hits = sum(1 for term in terms if term in haystack)
-    score = hits / len(terms)
-    if query in haystack:
-        score = min(1.0, score + 0.25)
-    return score
+    score = sum(term in haystack for term in terms) / len(terms)
+    return min(1.0, score + (0.25 if query in haystack else 0.0))
 
 
 def _cosine(left: Iterable[float], right: Iterable[float]) -> float:
@@ -73,6 +158,8 @@ class _Candidate:
     document: Document
     vector_score: float = 0.0
     keyword_score: float = 0.0
+    phrase_score: float = 0.0
+    matched_terms: list[str] | None = None
 
 
 class RetrievalService:
@@ -94,6 +181,13 @@ class RetrievalService:
         self.session_factory = session_factory
         self.settings = settings or get_settings()
         self.embedding_provider = embedding_provider or create_embedding_provider(self.settings)
+        self.latest_debug: dict[str, Any] = {
+            "requested_limit": None,
+            "primary_count": 0,
+            "channels": {"vector": [], "keyword": [], "phrase": []},
+            "fusion_order": [],
+        }
+        self.last_debug = self.latest_debug
 
     def _rows(self, session: Session) -> list[tuple[Chunk, Document]]:
         statement = (
@@ -135,9 +229,17 @@ class RetrievalService:
 
     def search(self, question: str, limit: int | None = None) -> list[SearchHit]:
         normalized = " ".join(question.split())
+        requested_limit = limit or self.settings.retrieval_context_limit
+        self.latest_debug = {
+            "requested_limit": requested_limit,
+            "primary_count": 0,
+            "channels": {"vector": [], "keyword": [], "phrase": []},
+            "fusion_order": [],
+        }
+        self.last_debug = self.latest_debug
         if not normalized:
             return []
-        limit = limit or self.settings.retrieval_context_limit
+        limit = requested_limit
         vector = self.embedding_provider.embed_query(normalized)
         with self.session_factory() as session:
             rows = self._rows(session)
@@ -149,7 +251,8 @@ class RetrievalService:
             for chunk, document in rows:
                 candidate = _Candidate(chunk=chunk, document=document)
                 candidate.vector_score = max(0.0, _cosine(vector, chunk.embedding or []))
-                candidate.keyword_score = _keyword_score(normalized, chunk.content)
+                candidate.keyword_score, candidate.matched_terms = _keyword_details(normalized, document, chunk)
+                candidate.phrase_score = _phrase_score(normalized, document, chunk)
                 candidates[chunk.id] = candidate
 
             if postgres_vector is not None:
@@ -173,8 +276,24 @@ class RetrievalService:
                 )
                 if item.keyword_score > 0
             ][: self.settings.retrieval_keyword_candidates]
-            channels = {"vector": vector_ids, "keyword": keyword_ids}
-            fused = reciprocal_rank_fusion(channels)
+            phrase_ids = [
+                item.chunk.id
+                for item in sorted(
+                    candidates.values(), key=lambda item: item.phrase_score, reverse=True
+                )
+                if item.phrase_score > 0
+            ][: self.settings.retrieval_phrase_candidates]
+            channels = {"vector": vector_ids, "keyword": keyword_ids, "phrase": phrase_ids}
+            weights = {
+                "vector": self.settings.retrieval_vector_rrf_weight,
+                "keyword": self.settings.retrieval_keyword_rrf_weight,
+                "phrase": self.settings.retrieval_phrase_rrf_weight,
+            }
+            fused = reciprocal_rank_fusion(channels, weights=weights)
+            self.latest_debug["channels"] = {
+                name: [{"chunk_id": item_id, "score": getattr(candidates[item_id], f"{name}_score", 0.0)} for item_id in ids]
+                for name, ids in channels.items()
+            }
             if not fused:
                 return []
 
@@ -184,6 +303,7 @@ class RetrievalService:
                 key=lambda chunk_id: (fused[chunk_id], candidates[chunk_id].vector_score),
                 reverse=True,
             )
+            self.latest_debug["fusion_order"] = list(ranked)
             result: list[SearchHit] = []
             per_document: dict[int, int] = defaultdict(int)
             for chunk_id in ranked:
@@ -215,12 +335,18 @@ class RetrievalService:
                         score=bounded,
                         vector_score=candidate.vector_score,
                         keyword_score=candidate.keyword_score,
+                        phrase_score=candidate.phrase_score,
                         fusion_score=fusion,
                         matched_channels=matched,
+                        matched_terms=list(candidate.matched_terms or []),
                     )
                 )
                 if len(result) >= limit:
                     break
+
+            for rank, hit in enumerate(result, start=1):
+                hit.rank = rank
+            self.latest_debug["primary_count"] = len(result)
 
             # Adjacent chunks often contain the definition or example that a
             # top-ranked chunk refers to. Add a small bounded window after
@@ -260,8 +386,12 @@ class RetrievalService:
                                 page_from=adjacent.chunk.page_from,
                                 page_to=adjacent.chunk.page_to,
                                 score=max(0.0, primary.score * 0.75),
+                                vector_score=adjacent.vector_score,
+                                keyword_score=adjacent.keyword_score,
+                                phrase_score=adjacent.phrase_score,
                                 fusion_score=primary.fusion_score * 0.5,
                                 matched_channels=["neighbor"],
+                                is_neighbor=True,
                             )
                         )
                         neighbor_budget -= 1

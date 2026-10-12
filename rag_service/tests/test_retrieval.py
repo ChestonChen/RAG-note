@@ -13,6 +13,108 @@ def test_rrf_prefers_an_item_ranked_in_multiple_channels():
     assert scores[2] > scores[3]
 
 
+def test_rrf_accepts_optional_channel_weights():
+    scores = reciprocal_rank_fusion(
+        {"vector": [1], "keyword": [2]}, weights={"vector": 2.0, "keyword": 0.5}
+    )
+    assert scores[1] > scores[2]
+
+
+def test_retrieval_matches_technical_identifiers_and_chinese_ngrams_in_metadata():
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        retrieval_vector_candidates=3,
+        retrieval_keyword_candidates=3,
+        retrieval_phrase_candidates=3,
+        retrieval_context_limit=2,
+        retrieval_neighbor_window=0,
+    )
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    with factory() as session:
+        document = Document(
+            source_path="knowledge/pgvector.md",
+            source_type="markdown",
+            title="pgvector RRF 运维指南",
+            file_hash="b" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add(document)
+        session.flush()
+        session.add(
+            Chunk(
+                document_id=document.id,
+                chunk_index=0,
+                content="向量索引支持 C++ 扩展。",
+                heading_path=["pgvector 配置"],
+                token_count=5,
+                embedding=provider.embed_query("向量索引支持 C++ 扩展"),
+            )
+        )
+        session.commit()
+
+    hits = RetrievalService(factory, settings=settings, embedding_provider=provider).search(
+        "pgvector RRF C++ 向量索引"
+    )
+    assert hits
+    assert hits[0].keyword_score > 0
+    assert "pgvector" in hits[0].matched_terms
+    assert any(term in hits[0].matched_terms for term in ("向量", "向量索引"))
+
+
+def test_retrieval_reports_exact_phrase_score_and_primary_neighbor_metadata():
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        retrieval_vector_candidates=3,
+        retrieval_keyword_candidates=3,
+        retrieval_phrase_candidates=3,
+        retrieval_context_limit=1,
+        retrieval_neighbor_window=1,
+    )
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    with factory() as session:
+        document = Document(
+            source_path="note.md",
+            source_type="markdown",
+            title="RRF reference",
+            file_hash="c" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add(document)
+        session.flush()
+        for index, content in enumerate(("before context", "RRF anchor phrase", "after context")):
+            session.add(
+                Chunk(
+                    document_id=document.id,
+                    chunk_index=index,
+                    content=content,
+                    heading_path=["RRF"],
+                    token_count=3,
+                    embedding=provider.embed_query(content),
+                )
+            )
+        session.commit()
+
+    hits = RetrievalService(factory, settings=settings, embedding_provider=provider).search(
+        "RRF anchor phrase"
+    )
+    primary = [hit for hit in hits if not hit.is_neighbor]
+    neighbors = [hit for hit in hits if hit.is_neighbor]
+    assert primary and primary[0].rank == 1
+    assert primary[0].phrase_score > 0
+    assert neighbors and all(hit.rank is None for hit in neighbors)
+    assert all(hit.is_neighbor for hit in neighbors)
+
+
 def test_context_builder_adds_stable_citation_labels():
     hits = [
         SearchHit(

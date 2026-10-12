@@ -97,9 +97,20 @@ def create_app(
     def retrieval_debug(request: SearchRequest) -> dict[str, Any]:
         hits = retrieval_service.search(request.question, request.limit)
         context = context_builder.build(request.question, hits)
+        retrieval_debug_data = getattr(retrieval_service, "latest_debug", {}) or {}
         return {
             "question": request.question,
             "normalized_question": " ".join(request.question.split()),
+            "requested_limit": retrieval_debug_data.get(
+                "requested_limit", request.limit or settings.retrieval_context_limit
+            ),
+            "primary_count": retrieval_debug_data.get(
+                "primary_count", sum(1 for hit in hits if not hit.is_neighbor)
+            ),
+            "channels": retrieval_debug_data.get("channels", {}),
+            "fusion_order": retrieval_debug_data.get(
+                "fusion_order", [hit.chunk_id for hit in hits if not hit.is_neighbor]
+            ),
             "hits": [hit.model_dump() for hit in hits],
             "context": context.text,
             "citations": [citation.model_dump() for citation in context.citations],

@@ -28,6 +28,10 @@ class SearchHit(BaseModel):
     keyword_score: float = 0.0
     fusion_score: float = 0.0
     matched_channels: list[str] = Field(default_factory=list)
+    rank: int | None = None
+    is_neighbor: bool = False
+    matched_terms: list[str] = Field(default_factory=list)
+    phrase_score: float = 0.0
 
 
 class IngestRequest(BaseModel):

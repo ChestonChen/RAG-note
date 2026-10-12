@@ -48,6 +48,10 @@ class Settings(BaseSettings):
 
     retrieval_vector_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_VECTOR_CANDIDATES")
     retrieval_keyword_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_KEYWORD_CANDIDATES")
+    retrieval_phrase_candidates: int = Field(default=20, ge=1, validation_alias="RETRIEVAL_PHRASE_CANDIDATES")
+    retrieval_vector_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_VECTOR_RRF_WEIGHT")
+    retrieval_keyword_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_KEYWORD_RRF_WEIGHT")
+    retrieval_phrase_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_PHRASE_RRF_WEIGHT")
     retrieval_context_limit: int = Field(default=8, ge=1, validation_alias="RETRIEVAL_CONTEXT_LIMIT")
     retrieval_neighbor_window: int = Field(default=1, ge=0, validation_alias="RETRIEVAL_NEIGHBOR_WINDOW")
     retrieval_per_document_limit: int = Field(default=3, ge=1, validation_alias="RETRIEVAL_PER_DOCUMENT_LIMIT")
