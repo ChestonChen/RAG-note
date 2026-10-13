@@ -6,7 +6,11 @@ from rag_service.app.models import Chunk, Document
 from rag_service.app.retrieval import RetrievalService, reciprocal_rank_fusion
 from rag_service.app.schemas import SearchHit
 from rag_service.app.query_planning import QueryPlanner
-from rag_service.app.search_text import deterministic_cjk_ngrams
+from rag_service.app.search_text import (
+    build_full_text_query,
+    build_search_text,
+    deterministic_cjk_ngrams,
+)
 from rag_service.app.term_dictionary import TermDictionary
 
 
@@ -109,13 +113,26 @@ def test_postgres_full_text_query_uses_bound_query_text_without_sql_fragments():
     assert query not in compiled
     params = session.statement.compile(dialect=postgresql.dialect()).params
     bound_query = next(value for value in params.values() if isinstance(value, str))
-    assert "postgresql 中文检索 std::vector" in bound_query
+    assert "postgresql std::vector" in bound_query
     assert all(ngram in bound_query for ngram in deterministic_cjk_ngrams(query))
 
     injection = "pgvector'); DROP TABLE chunks; --"
     assert service._postgres_full_text_scores(session, injection) == ([], {})
     injection_sql = str(session.statement.compile(dialect=postgresql.dialect()))
     assert injection not in injection_sql
+
+
+def test_postgres_cjk_query_uses_ngrams_without_requiring_raw_contiguous_run():
+    question = "向量检索"
+    source = build_search_text(content="向量数据库检索")
+    query = build_full_text_query(question)
+
+    assert question not in query
+    query_terms = set(deterministic_cjk_ngrams(question))
+    source_terms = set(deterministic_cjk_ngrams("向量数据库检索"))
+    assert query_terms & {term for term in query_terms if term in source}
+    assert " OR " in query
+    assert any(term in query for term in query_terms & source_terms)
 
 
 def test_exact_channel_keeps_technical_identifier_boundaries():

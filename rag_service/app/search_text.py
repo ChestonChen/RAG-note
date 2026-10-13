@@ -50,19 +50,28 @@ def build_full_text_query(text: str) -> str:
 
     ``search_text`` stores the readable source followed by technical
     identifiers and deterministic CJK n-grams.  PostgreSQL must receive the
-    same derived terms for Chinese questions; retaining the normalized source
-    first also keeps ASCII phrases and identifiers searchable.  The returned
+    same derived terms for Chinese questions; retaining the normalized ASCII
+    phrase skeleton also keeps ASCII phrases and identifiers searchable.  The returned
     value is data for a bound SQL parameter, never a SQL fragment.
     """
 
-    normalized = normalize_search_text(text)
-    if not normalized:
+    # A contiguous CJK run is not a stable PostgreSQL ``simple`` token: a
+    # source may contain the same concepts separated by another character.
+    # Query only its deterministic n-grams, while retaining the ASCII phrase
+    # skeleton for ordinary words and technical identifiers.
+    ascii_phrase = normalize_search_text(_CJK_RUN_RE.sub(" ", text or ""))
+    if not ascii_phrase and not _CJK_RUN_RE.search(text or ""):
         return ""
-    terms = [
-        *technical_identifier_tokens(text),
-        *deterministic_cjk_ngrams(text),
-    ]
-    return normalize_search_text(" ".join([normalized, *terms]))
+    identifiers = technical_identifier_tokens(text)
+    cjk_terms = deterministic_cjk_ngrams(text)
+    if cjk_terms:
+        # ``websearch_to_tsquery`` treats plain whitespace as AND.  CJK
+        # n-grams from a longer source need an OR clause because an interior
+        # query n-gram can be separated by characters in that source.
+        cjk_clause = " OR ".join(cjk_terms)
+        prefix = " ".join(part for part in (ascii_phrase, *identifiers) if part)
+        return f"{prefix} OR {cjk_clause}" if prefix else cjk_clause
+    return normalize_search_text(" ".join([ascii_phrase, *identifiers]))
 
 
 def build_search_text(
