@@ -87,3 +87,18 @@ def test_broad_and_technical_terms_are_selected_only_when_relevant(tmp_path):
     assert "hint-secret" not in unrelated.rewritten_query
     assert "broad-secret" in relevant.rewritten_query
 
+
+def test_empty_or_invalid_dictionary_keys_fall_back_to_builtin(tmp_path):
+    cases = [
+        {"synonyms": {"": ["alias"]}},
+        {"synonyms": {"   ": ["alias"]}},
+        {"synonyms": {"topic": []}},
+        {"intent_expansions": {"": ["expansion"]}},
+        {"intent_expansions": {"   ": ["expansion"]}},
+        {"intent_expansions": {"definition": []}},
+    ]
+    for index, payload in enumerate(cases):
+        path = tmp_path / f"invalid-key-{index}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        assert TermDictionary.load(path).source == "builtin"
+

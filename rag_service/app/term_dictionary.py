@@ -40,7 +40,7 @@ _BUILTIN_TECHNICAL = ("RAG", "pgvector", "MySQL", "Redis", "TCP", "vector")
 
 
 def _strings(value: Any, *, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+    if not isinstance(value, list) or not value or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{field} must be a list of non-empty strings")
     return tuple(dict.fromkeys(item.strip() for item in value))
 
@@ -102,16 +102,18 @@ class TermDictionary:
                 old = entries.get(key, TermEntry(key, (), ()))
                 if "aliases" in raw and "synonyms" in raw:
                     raise ValueError("entity aliases and synonyms are ambiguous")
-                aliases = tuple(dict.fromkeys((*old.aliases, *_strings(raw.get("aliases", raw.get("synonyms", [])), field="aliases"))))
-                expansions = tuple(dict.fromkeys((*old.expansions, *_strings(raw.get("expansions", []), field="expansions"))))
+                alias_key = "aliases" if "aliases" in raw else "synonyms"
+                aliases = tuple(dict.fromkeys((*old.aliases, *(_strings(raw[alias_key], field="aliases") if alias_key in raw else ()))))
+                expansions = tuple(dict.fromkeys((*old.expansions, *(_strings(raw["expansions"], field="expansions") if "expansions" in raw else ()))))
                 entries[key] = TermEntry(key, aliases or (key,), expansions)
             raw_synonyms = payload.get("synonyms", {})
             if raw_synonyms is not None:
                 if not isinstance(raw_synonyms, dict):
                     raise ValueError("synonyms must be an object")
                 for canonical, values in raw_synonyms.items():
-                    if not isinstance(canonical, str):
+                    if not isinstance(canonical, str) or not canonical.strip():
                         raise ValueError("invalid synonym key")
+                    canonical = canonical.strip()
                     old = entries.get(canonical, TermEntry(canonical, (canonical,), ()))
                     entries[canonical] = TermEntry(
                         canonical,
@@ -124,13 +126,14 @@ class TermDictionary:
                 if not isinstance(raw_intents, dict):
                     raise ValueError("intent_expansions must be an object")
                 for intent, values in raw_intents.items():
-                    if not isinstance(intent, str):
+                    if not isinstance(intent, str) or not intent.strip():
                         raise ValueError("invalid intent")
+                    intent = intent.strip()
                     intents[intent] = tuple(dict.fromkeys((*intents.get(intent, ()), *_strings(values, field="intent_expansions"))))
-            generic = tuple(dict.fromkeys((*baseline._generic, *_strings(payload.get("generic_terms", []), field="generic_terms"))))
-            broad = tuple(dict.fromkeys((*baseline._broad, *_strings(payload.get("broad_terms", []), field="broad_terms"))))
-            technical = tuple(dict.fromkeys((*baseline._technical, *_strings(payload.get("technical_hints", []), field="technical_hints"))))
-            required = _strings(payload.get("required_terms", []), field="required_terms")
+            generic = tuple(dict.fromkeys((*baseline._generic, *(_strings(payload["generic_terms"], field="generic_terms") if "generic_terms" in payload else ()))))
+            broad = tuple(dict.fromkeys((*baseline._broad, *(_strings(payload["broad_terms"], field="broad_terms") if "broad_terms" in payload else ()))))
+            technical = tuple(dict.fromkeys((*baseline._technical, *(_strings(payload["technical_hints"], field="technical_hints") if "technical_hints" in payload else ()))))
+            required = _strings(payload["required_terms"], field="required_terms") if "required_terms" in payload else ()
             version = payload.get("version", "external-v1")
             if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", version):
                 raise ValueError("version must be a safe identifier")
