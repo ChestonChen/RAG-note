@@ -96,6 +96,11 @@ def validate_embedding_provider(
 
 
 def _factory_engine(settings: Settings, factory: Callable[[], Session] | Any):
+    bind = getattr(factory, "bind", None)
+    if bind is None:
+        bind = getattr(factory, "kw", {}).get("bind")
+    if bind is not None:
+        return bind
     session = None
     try:
         if callable(factory):
@@ -111,11 +116,6 @@ def _factory_engine(settings: Settings, factory: Callable[[], Session] | Any):
             bind = getattr(session, "bind", None)
             if bind is not None:
                 return bind
-        bind = getattr(factory, "bind", None)
-        if bind is None:
-            bind = getattr(factory, "kw", {}).get("bind")
-        if bind is not None:
-            return bind
     finally:
         close = getattr(session, "close", None)
         if callable(close):
