@@ -12,11 +12,12 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Iterator
 
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, inspect, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
 from .models import Base, Chunk, Document, IngestionJob, configure_embedding_dimensions
+from .search_text import build_search_text
 
 
 # pgvector's standard ``vector`` type supports HNSW indexes up to 2,000
@@ -96,11 +97,12 @@ def session_scope(
 
 
 def init_db(engine: Engine | None = None, settings: Settings | None = None) -> Engine:
-    """Create extensions and all application tables.
+    """Create extensions, tables, derived search data and retrieval indexes.
 
     PostgreSQL extensions are created only for a PostgreSQL engine.  This makes
     the same function useful for SQLite unit tests while keeping the production
-    setup explicit and repeatable.
+    setup explicit and repeatable.  ``create_all`` creates new tables; the
+    explicit column/backfill statements below handle existing databases.
     """
 
     settings = settings or get_settings()
@@ -111,6 +113,8 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     Base.metadata.create_all(engine)
+    _ensure_search_text_column(engine)
+    _backfill_search_text(engine)
     if engine.dialect.name == "postgresql":
         # Keep the two expensive retrieval channels index-backed once the
         # knowledge base grows beyond the local smoke-test size.  These are
@@ -132,6 +136,18 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
             )
             connection.execute(
                 text(
+                    "CREATE INDEX IF NOT EXISTS ix_chunks_search_text_fts "
+                    "ON chunks USING gin (to_tsvector('simple', search_text))"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chunks_search_text_trgm "
+                    "ON chunks USING gin (search_text gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS ix_documents_title_trgm "
                     "ON documents USING gin (title gin_trgm_ops)"
                 )
@@ -143,6 +159,58 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
                 )
             )
     return engine
+
+
+def _ensure_search_text_column(engine: Engine) -> None:
+    """Add the derived column to databases created before this schema version."""
+
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS search_text TEXT NOT NULL DEFAULT ''")
+            )
+        return
+    if engine.dialect.name != "sqlite":
+        return
+    inspector = inspect(engine)
+    if not inspector.has_table("chunks"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("chunks")}
+    if "search_text" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE chunks ADD COLUMN search_text TEXT NOT NULL DEFAULT ''"))
+
+
+def _backfill_search_text(engine: Engine) -> None:
+    """Recompute search text using bound values for every existing chunk."""
+
+    with engine.begin() as connection:
+        result = connection.execute(
+            select(
+                Chunk.id,
+                Chunk.content,
+                Chunk.heading_path,
+                Document.title,
+                Document.source_path,
+            ).join(Document, Chunk.document_id == Document.id)
+        )
+        if result is None:
+            rows = []
+        else:
+            rows = result.all() if hasattr(result, "all") else list(result)
+        for row in rows:
+            chunk_id, content, heading_path, title, source_path = row[:5]
+            derived = build_search_text(
+                title=str(title or ""),
+                heading_path=heading_path or [],
+                source_path=str(source_path or ""),
+                content=str(content or ""),
+            )
+            connection.execute(
+                update(Chunk.__table__)
+                .where(Chunk.__table__.c.id == chunk_id)
+                .values(search_text=derived)
+            )
 
 
 def dispose_cached_engines() -> None:

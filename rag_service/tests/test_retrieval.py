@@ -9,6 +9,140 @@ from rag_service.app.query_planning import QueryPlanner
 from rag_service.app.term_dictionary import TermDictionary
 
 
+def test_exact_and_full_text_channels_are_independent_on_sqlite():
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        retrieval_vector_candidates=3,
+        retrieval_keyword_candidates=3,
+        retrieval_phrase_candidates=3,
+        retrieval_full_text_candidates=3,
+        retrieval_exact_candidates=3,
+        retrieval_context_limit=3,
+        retrieval_neighbor_window=0,
+    )
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    vector = provider.embed_query("pgvector")
+    with factory() as session:
+        exact_document = Document(
+            source_path="exact.md",
+            source_type="markdown",
+            title="pgvector exact title",
+            file_hash="1" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        body_document = Document(
+            source_path="body.md",
+            source_type="markdown",
+            title="Database notes",
+            file_hash="2" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add_all([exact_document, body_document])
+        session.flush()
+        session.add_all(
+            [
+                Chunk(
+                    document_id=exact_document.id,
+                    chunk_index=0,
+                    content="Vector storage overview.",
+                    heading_path=["Storage"],
+                    token_count=3,
+                    embedding=vector,
+                ),
+                Chunk(
+                    document_id=body_document.id,
+                    chunk_index=0,
+                    content="pgvector appears in the body of this note.",
+                    heading_path=["Storage"],
+                    token_count=7,
+                    embedding=vector,
+                ),
+            ]
+        )
+        session.commit()
+
+    service = RetrievalService(factory, settings=settings, embedding_provider=provider)
+    hits = service.search("pgvector")
+    assert hits
+    assert any(hit.exact_score > 0 and "exact" in hit.matched_channels for hit in hits)
+    assert any(hit.full_text_score > 0 and "full_text" in hit.matched_channels for hit in hits)
+    channels = service.get_last_debug()["channels"]
+    assert "full_text" in channels
+    assert "exact" in channels
+    assert service.get_last_debug()["timings_ms"]["full_text"] >= 0
+    assert service.get_last_debug()["timings_ms"]["exact"] >= 0
+
+
+def test_postgres_full_text_query_uses_bound_query_text_without_sql_fragments():
+    from sqlalchemy.dialects import postgresql
+
+    settings = Settings(database_url="sqlite+pysqlite:///:memory:")
+    service = RetrievalService(lambda: None, settings=settings, embedding_provider=HashingEmbeddingProvider(settings.embedding_dimensions))
+
+    class CaptureSession:
+        def __init__(self):
+            self.statement = None
+            self.dialect = postgresql.dialect()
+
+        def get_bind(self):
+            return type("Bind", (), {"dialect": self.dialect})()
+
+        def execute(self, statement):
+            self.statement = statement
+            return []
+
+    session = CaptureSession()
+    query = "pgvector'); DROP TABLE chunks; --"
+    assert service._postgres_full_text_scores(session, query) == ([], {})
+    compiled = str(session.statement.compile(dialect=postgresql.dialect()))
+    assert "to_tsvector" in compiled
+    assert "websearch_to_tsquery" in compiled
+    assert query not in compiled
+
+
+def test_exact_channel_keeps_technical_identifier_boundaries():
+    settings = Settings(database_url="sqlite+pysqlite:///:memory:")
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    with factory() as session:
+        document = Document(
+            source_path="dataset.md",
+            source_type="markdown",
+            title="Dataset operations",
+            file_hash="3" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add(document)
+        session.flush()
+        session.add(
+            Chunk(
+                document_id=document.id,
+                chunk_index=0,
+                content="dataset operations",
+                heading_path=["Collections"],
+                token_count=2,
+                embedding=provider.embed_query("dataset operations"),
+            )
+        )
+        session.commit()
+        service = RetrievalService(factory, settings=settings, embedding_provider=provider)
+        exact_ids, exact_scores = service._exact_scores(session, "set")
+    assert exact_ids == []
+    assert exact_scores == {}
+
+
 def test_rrf_prefers_an_item_ranked_in_multiple_channels():
     scores = reciprocal_rank_fusion({"vector": [1, 2], "keyword": [2, 3]})
     assert scores[2] > scores[1]

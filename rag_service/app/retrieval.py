@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
@@ -20,6 +20,7 @@ from .models import Chunk, Document
 from .query_planning import QueryPlanner
 from .term_dictionary import TermDictionary
 from .reranker import Reranker, create_reranker
+from .search_text import build_search_text
 from .schemas import SearchHit
 
 
@@ -224,6 +225,65 @@ def _keyword_score(question: str, content: str) -> float:
     return min(1.0, score + (0.25 if query in haystack else 0.0))
 
 
+def _search_text_for(document: Document, chunk: Chunk) -> str:
+    """Use the stored derived field and repair blank legacy values in memory."""
+
+    stored = str(getattr(chunk, "search_text", "") or "")
+    if stored.strip():
+        return stored
+    return build_search_text(
+        title=document.title,
+        heading_path=chunk.heading_path or [],
+        source_path=document.source_path,
+        content=chunk.content,
+    )
+
+
+def _full_text_score(question: str, document: Document, chunk: Chunk) -> float:
+    terms = _terms(question)
+    haystack = _search_text_for(document, chunk)
+    if not terms or not haystack:
+        return 0.0
+    matches = sum(1 for term in terms if _term_occurs(term, haystack))
+    score = matches / len(terms)
+    if _normalized_text(question) in _normalized_text(haystack):
+        score += 0.25
+    return min(1.0, score)
+
+
+def _exact_score(question: str, document: Document, chunk: Chunk) -> float:
+    """Score exact query/identifier matches in metadata only."""
+
+    query = _normalized_text(question)
+    core = _normalized_text(_core_phrase(question))
+    metadata_fields = (
+        (document.title, 1.0),
+        (" ".join(chunk.heading_path or []), 0.95),
+        (document.source_path, 0.75),
+    )
+    variants = [value for value in dict.fromkeys((query, core)) if value]
+    for value, weight in metadata_fields:
+        normalized = _normalized_text(value)
+        if any(
+            candidate == normalized
+            or (
+                candidate in normalized
+                and (
+                    " " in candidate
+                    or not re.search(r"[a-z0-9]", candidate)
+                    or _term_occurs(candidate, normalized)
+                )
+            )
+            for candidate in variants
+        ):
+            return weight
+    terms = _ascii_identifiers(question)
+    for value, weight in metadata_fields:
+        if any(_term_occurs(term, value) for term in terms):
+            return weight * 0.85
+    return 0.0
+
+
 def _cosine(left: Iterable[float], right: Iterable[float]) -> float:
     a = list(left)
     b = list(right)
@@ -245,6 +305,8 @@ class _Candidate:
     keyword_score: float = 0.0
     phrase_score: float = 0.0
     trigram_score: float = 0.0
+    full_text_score: float = 0.0
+    exact_score: float = 0.0
     rerank_score: float | None = None
     topic_score: float = 0.0
     topic_metadata_match: bool = False
@@ -281,7 +343,14 @@ class RetrievalService:
         self.latest_debug: dict[str, Any] = {
             "requested_limit": None,
             "primary_count": 0,
-            "channels": {"vector": [], "keyword": [], "phrase": [], "trigram": []},
+            "channels": {
+                "vector": [],
+                "keyword": [],
+                "phrase": [],
+                "full_text": [],
+                "exact": [],
+                "trigram": [],
+            },
             "fusion_order": [],
             "query_plan": {},
             "reranker": {"enabled": bool(self.settings.reranker_enabled), "attempted": False, "status": "disabled"},
@@ -370,13 +439,83 @@ class RetrievalService:
                 .order_by(similarity.desc())
                 .limit(self.settings.retrieval_trigram_candidates)
             )
-            rows = list(session.execute(statement).all())
+            result = session.execute(statement)
+            rows = result.all() if hasattr(result, "all") else list(result)
             ids = [int(chunk_id) for chunk_id, _ in rows]
             scores = {int(chunk_id): max(0.0, min(1.0, float(score))) for chunk_id, score in rows}
             return ids, scores
         except Exception:
-            session.rollback()
+            rollback = getattr(session, "rollback", None)
+            if callable(rollback):
+                rollback()
             return None
+
+    def _postgres_full_text_scores(
+        self, session: Session, question: str
+    ) -> tuple[list[int], dict[int, float]] | None:
+        """Run PostgreSQL simple-dictionary FTS with a bound query parameter."""
+
+        bind = session.get_bind()
+        if bind is None or bind.dialect.name != "postgresql":
+            return None
+        try:
+            simple = literal_column("'simple'")
+            document_vector = func.to_tsvector(simple, Chunk.search_text)
+            query_vector = func.websearch_to_tsquery(simple, question)
+            rank = func.ts_rank_cd(document_vector, query_vector)
+            statement = (
+                select(Chunk.id, rank.label("full_text_score"))
+                .join(Document, Chunk.document_id == Document.id)
+                .where(Document.status == "ready")
+                .where(rank > 0)
+                .order_by(rank.desc(), Chunk.id)
+                .limit(self.settings.retrieval_full_text_candidates)
+            )
+            result = session.execute(statement)
+            rows = result.all() if hasattr(result, "all") else list(result)
+            ids = [int(chunk_id) for chunk_id, _ in rows]
+            scores = {
+                int(chunk_id): max(0.0, min(1.0, float(score)))
+                for chunk_id, score in rows
+            }
+            return ids, scores
+        except Exception:
+            rollback = getattr(session, "rollback", None)
+            if callable(rollback):
+                rollback()
+            return None
+
+    def _exact_scores(
+        self,
+        session: Session,
+        question: str,
+        rows: list[tuple[Chunk, Document]] | None = None,
+    ) -> tuple[list[int], dict[int, float]]:
+        """Return an independent exact metadata channel on every database."""
+
+        rows = rows if rows is not None else self._rows(session)
+        scored = [
+            (chunk.id, _exact_score(question, document, chunk))
+            for chunk, document in rows
+        ]
+        scored = [(chunk_id, score) for chunk_id, score in scored if score > 0]
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        scored = scored[: self.settings.retrieval_exact_candidates]
+        return [chunk_id for chunk_id, _ in scored], {chunk_id: score for chunk_id, score in scored}
+
+    def _python_full_text_scores(
+        self,
+        question: str,
+        rows: list[tuple[Chunk, Document]],
+    ) -> tuple[list[int], dict[int, float]]:
+        scored = [
+            (chunk.id, _full_text_score(question, document, chunk))
+            for chunk, document in rows
+        ]
+        scored = [(chunk_id, score) for chunk_id, score in scored if score > 0]
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        scored = scored[: self.settings.retrieval_full_text_candidates]
+        return [chunk_id for chunk_id, _ in scored], {chunk_id: score for chunk_id, score in scored}
 
     def search(self, question: str, limit: int | None = None) -> list[SearchHit]:
         started = time.perf_counter()
@@ -386,7 +525,14 @@ class RetrievalService:
         self.latest_debug = {
             "requested_limit": requested_limit,
             "primary_count": 0,
-            "channels": {"vector": [], "keyword": [], "phrase": [], "trigram": []},
+            "channels": {
+                "vector": [],
+                "keyword": [],
+                "phrase": [],
+                "full_text": [],
+                "exact": [],
+                "trigram": [],
+            },
             "fusion_order": [],
             "query_plan": plan.to_debug_dict(),
             "reranker": {
@@ -416,6 +562,20 @@ class RetrievalService:
             candidates: dict[int, _Candidate] = {}
             postgres_vector = self._postgres_vector_scores(session, vector)
             postgres_trigram = self._postgres_trigram_scores(session, normalized)
+            full_text_started = time.perf_counter()
+            postgres_full_text = self._postgres_full_text_scores(session, normalized)
+            if postgres_full_text is None:
+                full_text_ids, full_text_scores = self._python_full_text_scores(normalized, rows)
+            else:
+                full_text_ids, full_text_scores = postgres_full_text
+            self._debug_state()["timings_ms"]["full_text"] = round(
+                (time.perf_counter() - full_text_started) * 1000, 3
+            )
+            exact_started = time.perf_counter()
+            exact_ids, exact_scores = self._exact_scores(session, normalized, rows)
+            self._debug_state()["timings_ms"]["exact"] = round(
+                (time.perf_counter() - exact_started) * 1000, 3
+            )
             for chunk, document in rows:
                 candidate = _Candidate(chunk=chunk, document=document)
                 candidate.vector_score = max(0.0, _cosine(vector, chunk.embedding or []))
@@ -429,6 +589,8 @@ class RetrievalService:
                     lexical_question, document, chunk
                 )
                 candidate.phrase_score = _phrase_score(normalized, document, chunk)
+                candidate.full_text_score = full_text_scores.get(chunk.id, 0.0)
+                candidate.exact_score = exact_scores.get(chunk.id, 0.0)
                 (
                     candidate.topic_score,
                     candidate.topic_metadata_match,
@@ -501,16 +663,22 @@ class RetrievalService:
             else:
                 trigram_ids = []
             trigram_ids = [item_id for item_id in trigram_ids if item_id in candidates]
+            full_text_ids = [item_id for item_id in full_text_ids if item_id in candidates]
+            exact_ids = [item_id for item_id in exact_ids if item_id in candidates]
             channels = {
                 "vector": vector_ids,
                 "keyword": keyword_ids,
                 "phrase": phrase_ids,
+                "full_text": full_text_ids,
+                "exact": exact_ids,
                 "trigram": trigram_ids,
             }
             weights = {
                 "vector": self.settings.retrieval_vector_rrf_weight,
                 "keyword": self.settings.retrieval_keyword_rrf_weight,
                 "phrase": self.settings.retrieval_phrase_rrf_weight,
+                "full_text": self.settings.retrieval_full_text_rrf_weight,
+                "exact": self.settings.retrieval_exact_rrf_weight,
                 "trigram": self.settings.retrieval_trigram_rrf_weight,
             }
             fused = reciprocal_rank_fusion(channels, weights=weights)
@@ -562,6 +730,8 @@ class RetrievalService:
                     0.50 * candidate.vector_score
                     + 0.18 * candidate.keyword_score
                     + 0.25 * candidate.phrase_score
+                    + 0.06 * candidate.full_text_score
+                    + 0.10 * candidate.exact_score
                     + 0.07 * candidate.trigram_score
                     + 0.10 * min(1.0, fusion * 10)
                 )
@@ -582,6 +752,8 @@ class RetrievalService:
                         keyword_score=candidate.keyword_score,
                         phrase_score=candidate.phrase_score,
                         trigram_score=candidate.trigram_score,
+                        full_text_score=candidate.full_text_score,
+                        exact_score=candidate.exact_score,
                         fusion_score=fusion,
                         matched_channels=matched,
                         matched_terms=list(candidate.matched_terms or []),
@@ -648,6 +820,8 @@ class RetrievalService:
                                 vector_score=adjacent.vector_score,
                                 keyword_score=adjacent.keyword_score,
                                 phrase_score=adjacent.phrase_score,
+                                full_text_score=adjacent.full_text_score,
+                                exact_score=adjacent.exact_score,
                                 fusion_score=primary.fusion_score * 0.5,
                                 matched_channels=["neighbor"],
                                 topic_score=adjacent.topic_score,

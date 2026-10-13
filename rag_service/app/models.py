@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -107,6 +107,12 @@ class Chunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     heading_path: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Derived from the owning document metadata and chunk content.  The
+    # ingestion path populates it; init_db backfills rows created by older
+    # versions before PostgreSQL full-text indexes are used.
+    search_text: Mapped[str] = mapped_column(
+        Text, default="", server_default=text("''"), nullable=False
+    )
     page_from: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)

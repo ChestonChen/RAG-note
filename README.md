@@ -59,7 +59,7 @@ docker-compose.yml      本机 PostgreSQL + pgvector
    Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/qa/ask -ContentType 'application/json' -Body '{"question":"pgvector 是做什么的"}'
    ```
 
-`/v1/retrieval/debug` 会返回每个 chunk 的向量分数、关键词分数、RRF 分数、命中的通道和最终上下文，另外会记录确定性的查询规划、各阶段耗时和可选 reranker 状态，适合调切片与检索。PostgreSQL 启用 `pg_trgm` 时会增加 trigram 模糊词法通道；SQLite 或不支持扩展时自动回退到 Python 词法通道。没有足够证据时 `/v1/qa/ask` 默认尝试联网回退；未配置联网搜索或仍然没有来源时，会返回低证据结果，不调用 LLM。问答结果会写入 `qa_logs`，日志写入失败不会阻断回答。
+`/v1/retrieval/debug` 会返回每个 chunk 的向量、关键词、PostgreSQL full-text、exact、phrase、trigram 分数、RRF 分数、命中的通道和最终上下文，另外会记录确定性的查询规划、各阶段耗时和可选 reranker 状态，适合调切片与检索。每个 chunk 的 `search_text` 由标题、章节、来源、正文、技术标识符和确定性的中文二/三元组组成；`init_db()` 会显式补齐该派生列、回填旧行并创建幂等的 PostgreSQL GIN 索引。PostgreSQL 启用 `pg_trgm` 时会增加 trigram 模糊词法通道；SQLite 或不支持扩展时 full-text/exact 自动回退到 Python 实现。没有足够证据时 `/v1/qa/ask` 默认尝试联网回退；未配置联网搜索或仍然没有来源时，会返回低证据结果，不调用 LLM。问答结果会写入 `qa_logs`，日志写入失败不会阻断回答。
 
 ## 远端 API 配置
 

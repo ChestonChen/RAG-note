@@ -39,6 +39,12 @@ class SearchHit(BaseModel):
     is_neighbor: bool = False
     matched_terms: list[str] = Field(default_factory=list)
     phrase_score: float = 0.0
+    trigram_score: float = 0.0
+    full_text_score: float = 0.0
+    exact_score: float = 0.0
+    topic_score: float = 0.0
+    topic_match: str = "none"
+    rerank_score: float | None = None
 
 
 class IngestRequest(BaseModel):

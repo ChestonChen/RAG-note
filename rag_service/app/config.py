@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     )
     retrieval_keyword_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_KEYWORD_CANDIDATES")
     retrieval_phrase_candidates: int = Field(default=20, ge=1, validation_alias="RETRIEVAL_PHRASE_CANDIDATES")
+    retrieval_full_text_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_FULL_TEXT_CANDIDATES")
+    retrieval_exact_candidates: int = Field(default=20, ge=1, validation_alias="RETRIEVAL_EXACT_CANDIDATES")
     retrieval_trigram_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_TRIGRAM_CANDIDATES")
     retrieval_trigram_min_similarity: float = Field(
         default=0.1, ge=0, le=1, validation_alias="RETRIEVAL_TRIGRAM_MIN_SIMILARITY"
@@ -91,6 +93,8 @@ class Settings(BaseSettings):
     retrieval_vector_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_VECTOR_RRF_WEIGHT")
     retrieval_keyword_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_KEYWORD_RRF_WEIGHT")
     retrieval_phrase_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_PHRASE_RRF_WEIGHT")
+    retrieval_full_text_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_FULL_TEXT_RRF_WEIGHT")
+    retrieval_exact_rrf_weight: float = Field(default=1.2, ge=0, validation_alias="RETRIEVAL_EXACT_RRF_WEIGHT")
     retrieval_trigram_rrf_weight: float = Field(default=0.5, ge=0, validation_alias="RETRIEVAL_TRIGRAM_RRF_WEIGHT")
     retrieval_context_limit: int = Field(default=8, ge=1, validation_alias="RETRIEVAL_CONTEXT_LIMIT")
     retrieval_neighbor_window: int = Field(default=1, ge=0, validation_alias="RETRIEVAL_NEIGHBOR_WINDOW")

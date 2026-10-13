@@ -15,6 +15,7 @@ from .config import Settings, get_settings
 from .db import get_session_factory
 from .embeddings import EmbeddingProvider, create_embedding_provider, safe_embedding_error
 from .models import Chunk, Document, IngestionJob
+from .search_text import build_search_text
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,12 @@ class IngestionService:
                 chunk_index=int(_value(payload, "chunk_index", "index", default=index)),
                 content=content,
                 heading_path=_heading_path(payload),
+                search_text=build_search_text(
+                    title=document.title,
+                    heading_path=_heading_path(payload),
+                    source_path=document.source_path,
+                    content=content,
+                ),
                 page_from=_value(payload, "page_from", "page_start", "page", default=None),
                 page_to=_value(payload, "page_to", "page_end", default=None),
                 token_count=int(token_count),
