@@ -45,6 +45,26 @@ def normalize_search_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", (text or "").casefold()).strip()
 
 
+def build_full_text_query(text: str) -> str:
+    """Build the bound query consumed by PostgreSQL's simple FTS parser.
+
+    ``search_text`` stores the readable source followed by technical
+    identifiers and deterministic CJK n-grams.  PostgreSQL must receive the
+    same derived terms for Chinese questions; retaining the normalized source
+    first also keeps ASCII phrases and identifiers searchable.  The returned
+    value is data for a bound SQL parameter, never a SQL fragment.
+    """
+
+    normalized = normalize_search_text(text)
+    if not normalized:
+        return ""
+    terms = [
+        *technical_identifier_tokens(text),
+        *deterministic_cjk_ngrams(text),
+    ]
+    return normalize_search_text(" ".join([normalized, *terms]))
+
+
 def build_search_text(
     *,
     title: str = "",
@@ -76,6 +96,7 @@ build_deterministic_search_text = build_search_text
 
 __all__ = [
     "build_deterministic_search_text",
+    "build_full_text_query",
     "build_search_text",
     "deterministic_cjk_ngrams",
     "extract_technical_identifiers",

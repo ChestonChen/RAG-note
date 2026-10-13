@@ -20,7 +20,7 @@ from .models import Chunk, Document
 from .query_planning import QueryPlanner
 from .term_dictionary import TermDictionary
 from .reranker import Reranker, create_reranker
-from .search_text import build_search_text
+from .search_text import build_full_text_query, build_search_text
 from .schemas import SearchHit
 
 
@@ -461,7 +461,8 @@ class RetrievalService:
         try:
             simple = literal_column("'simple'")
             document_vector = func.to_tsvector(simple, Chunk.search_text)
-            query_vector = func.websearch_to_tsquery(simple, question)
+            query_text = build_full_text_query(question)
+            query_vector = func.websearch_to_tsquery(simple, query_text)
             rank = func.ts_rank_cd(document_vector, query_vector)
             statement = (
                 select(Chunk.id, rank.label("full_text_score"))

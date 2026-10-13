@@ -6,6 +6,7 @@ from rag_service.app.models import Chunk, Document
 from rag_service.app.retrieval import RetrievalService, reciprocal_rank_fusion
 from rag_service.app.schemas import SearchHit
 from rag_service.app.query_planning import QueryPlanner
+from rag_service.app.search_text import deterministic_cjk_ngrams
 from rag_service.app.term_dictionary import TermDictionary
 
 
@@ -100,12 +101,21 @@ def test_postgres_full_text_query_uses_bound_query_text_without_sql_fragments():
             return []
 
     session = CaptureSession()
-    query = "pgvector'); DROP TABLE chunks; --"
+    query = "PostgreSQL 中文检索 std::vector"
     assert service._postgres_full_text_scores(session, query) == ([], {})
     compiled = str(session.statement.compile(dialect=postgresql.dialect()))
     assert "to_tsvector" in compiled
     assert "websearch_to_tsquery" in compiled
     assert query not in compiled
+    params = session.statement.compile(dialect=postgresql.dialect()).params
+    bound_query = next(value for value in params.values() if isinstance(value, str))
+    assert "postgresql 中文检索 std::vector" in bound_query
+    assert all(ngram in bound_query for ngram in deterministic_cjk_ngrams(query))
+
+    injection = "pgvector'); DROP TABLE chunks; --"
+    assert service._postgres_full_text_scores(session, injection) == ([], {})
+    injection_sql = str(session.statement.compile(dialect=postgresql.dialect()))
+    assert injection not in injection_sql
 
 
 def test_exact_channel_keeps_technical_identifier_boundaries():
