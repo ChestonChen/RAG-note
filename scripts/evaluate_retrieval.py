@@ -43,8 +43,23 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
             missing = {"id", "question", "relevant_sources", "answerable"} - value.keys()
             if missing:
                 raise ValueError(f"case on line {line_number} is missing: {sorted(missing)}")
+            if not isinstance(value["id"], str) or not value["id"].strip():
+                raise ValueError(f"id on line {line_number} must be a non-empty string")
+            if not isinstance(value["question"], str) or not value["question"].strip():
+                raise ValueError(f"question on line {line_number} must be a non-empty string")
+            if not isinstance(value["answerable"], bool):
+                raise ValueError(f"answerable on line {line_number} must be a boolean")
             if not isinstance(value["relevant_sources"], list):
                 raise ValueError(f"relevant_sources on line {line_number} must be a list")
+            if any(not isinstance(item, str) for item in value["relevant_sources"]):
+                raise ValueError(f"relevant_sources on line {line_number} must contain strings")
+            if "relevant_headings" in value:
+                if not isinstance(value["relevant_headings"], list) or any(
+                    not isinstance(item, str) for item in value["relevant_headings"]
+                ):
+                    raise ValueError(
+                        f"relevant_headings on line {line_number} must be a list of strings"
+                    )
             for field in ("tags", "expected_channels"):
                 if field in value and not isinstance(value[field], list):
                     raise ValueError(f"{field} on line {line_number} must be a list")
@@ -59,6 +74,15 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
                     f"paraphrase_of on line {line_number} must be a string"
                 )
             cases.append(value)
+    ids = {case["id"] for case in cases}
+    if len(ids) != len(cases):
+        raise ValueError(f"case ids in {path} must be unique")
+    for case in cases:
+        parent = case.get("paraphrase_of")
+        if parent is not None and parent not in ids:
+            raise ValueError(
+                f"paraphrase_of for case {case['id']!r} references unknown case {parent!r}"
+            )
     return cases
 
 
@@ -304,7 +328,7 @@ def evaluate_cases(
             "enabled": bool(settings.reranker_enabled),
             "attempted": bool(reranker_state.get("attempted", False)),
             "status": reranker_state.get("status", "disabled"),
-            "available": bool(settings.reranker_enabled and reranker_state),
+            "available": bool(reranker_state.get("attempted", False)),
             "comparison_run": False,
             "note": "status metadata only; enable an explicit A/B run to compare rankings",
         },

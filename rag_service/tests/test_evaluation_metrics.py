@@ -48,6 +48,15 @@ def test_load_cases_preserves_optional_metadata_and_defaults(tmp_path: Path):
                 "paraphrase_of": "base",
             }
         )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "base",
+                "question": "Base",
+                "relevant_sources": [],
+                "answerable": False,
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -55,6 +64,36 @@ def test_load_cases_preserves_optional_metadata_and_defaults(tmp_path: Path):
     assert load_cases(path)[0]["tags"] == ["paraphrase", "multi-source"]
     assert load_cases(path)[0]["expected_channels"] == ["vector", "keyword"]
     assert load_cases(path)[0]["paraphrase_of"] == "base"
+
+
+def test_load_cases_rejects_bad_types_and_unknown_paraphrase_reference(tmp_path: Path):
+    path = tmp_path / "bad.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "one",
+                "question": "Q",
+                "relevant_sources": ["a.md"],
+                "relevant_headings": ["Heading"],
+                "answerable": True,
+                "paraphrase_of": "missing",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="paraphrase_of"):
+        load_cases(path)
+
+    path.write_text(
+        '{"id": 1, "question": "Q", "relevant_sources": [2], "answerable": "yes"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="id"):
+        load_cases(path)
 
 
 def test_evaluation_report_records_signature_config_buckets_channels_and_citation_precision():
@@ -101,6 +140,31 @@ def test_unknown_false_positive_marks_high_confidence_unknown_case():
 
     assert report["metrics"]["unknown_false_positive_rate"] == 1.0
     assert report["cases"][0]["unknown_false_positive"] is True
+
+
+def test_reranker_comparison_is_unavailable_before_a_run():
+    settings = Settings(reranker_enabled=True)
+    retrieval = FakeRetrieval({"known": []}, settings)
+    retrieval.get_last_debug = lambda: {
+        "reranker": {"enabled": True, "attempted": False, "status": "no_discrimination"}
+    }
+
+    report = evaluate_cases(
+        retrieval,
+        ContextBuilder(settings),
+        [{"id": "known", "question": "known", "relevant_sources": [], "answerable": True}],
+    )
+
+    assert report["reranker_comparison"]["available"] is False
+    assert report["reranker_comparison"]["comparison_run"] is False
+
+
+def test_eval_cases_include_real_mysql_and_redis_fixture_sources():
+    cases = load_cases(Path("eval/retrieval_cases.jsonl"))
+    by_id = {case["id"]: case for case in cases}
+    assert by_id["mysql-basics"]["relevant_sources"] == ["04_mysql_notes.md"]
+    assert by_id["redis-persistence"]["relevant_sources"] == ["05_redis_notes.md"]
+    assert by_id["mysql-redis-cross-topic"]["answerable"] is False
 
 
 def test_validate_embedding_cli_is_one_shot_and_does_not_print_credentials(monkeypatch, capsys):
