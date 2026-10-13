@@ -14,6 +14,9 @@ class FakeRetrieval:
             "primary_count": len(hits),
             "channels": {"vector": [{"chunk_id": hit.chunk_id, "score": hit.vector_score} for hit in hits]},
             "fusion_order": [hit.chunk_id for hit in hits],
+            "query_plan": {"intent": "definition"},
+            "reranker": {"status": "disabled", "attempted": False},
+            "timings_ms": {"embedding": 1.2},
         }
 
     def search(self, question, limit=None):
@@ -78,6 +81,38 @@ def test_retrieval_debug_includes_primary_count_requested_limit_and_channels():
     assert body["requested_limit"] == 5
     assert body["primary_count"] == 1
     assert "channels" in body
+
+
+def test_retrieval_debug_exposes_query_plan_reranker_and_timings():
+    hit = SearchHit(
+        chunk_id=1,
+        content="Use pgvector.",
+        source="knowledge/example.md",
+        title="Example",
+        heading=["Storage"],
+        score=0.9,
+        matched_channels=["vector"],
+    )
+    client = TestClient(create_app(retrieval_service=FakeRetrieval([hit]), ingestion_service=FakeIngestion()))
+    response = client.post("/v1/retrieval/debug", json={"question": "vector", "limit": 5})
+    body = response.json()
+    assert body["query_plan"]["intent"] == "definition"
+    assert body["reranker"]["status"] == "disabled"
+    assert body["timings_ms"]["embedding"] == 1.2
+
+
+def test_retrieval_debug_redacts_sensitive_query_plan_terms():
+    hit = SearchHit(chunk_id=1, content="safe", source="safe.md", title="Safe", heading=[], score=0.9, matched_channels=["vector"])
+    retrieval = FakeRetrieval([hit])
+    retrieval.latest_debug["query_plan"] = {
+        "intent": "definition",
+        "rewritten_query": "private-token",
+        "expanded_terms": ["private-token"],
+        "entities": [{"matched_alias": "private-token"}],
+    }
+    client = TestClient(create_app(retrieval_service=retrieval, ingestion_service=FakeIngestion()))
+    body = client.post("/v1/retrieval/debug", json={"question": "safe"}).json()
+    assert "private-token" not in str(body["query_plan"])
 
 
 def test_low_evidence_does_not_call_generation():

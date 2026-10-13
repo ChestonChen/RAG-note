@@ -121,7 +121,11 @@ def _topic_alignment(question: str, plan: Any, document: Document, chunk: Chunk)
     metadata_match = False
     body_match = False
     for entity in entities:
-        aliases = [str(getattr(entity, "canonical", "")), str(getattr(entity, "matched_alias", ""))]
+        aliases = [
+            str(getattr(entity, "canonical", "")),
+            str(getattr(entity, "matched_alias", "")),
+            *(str(value) for value in (getattr(entity, "aliases", ()) or ())),
+        ]
         if any(_term_occurs(alias, metadata) for alias in aliases if alias):
             metadata_match = True
         if any(_term_occurs(alias, body) for alias in aliases if alias):

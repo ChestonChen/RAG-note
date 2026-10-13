@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -38,10 +39,10 @@ _BUILTIN_BROAD = ("数据库", "系统", "网络", "编程")
 _BUILTIN_TECHNICAL = ("RAG", "pgvector", "MySQL", "Redis", "TCP", "vector")
 
 
-def _strings(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(dict.fromkeys(str(item).strip() for item in value if isinstance(item, str) and item.strip()))
+def _strings(value: Any, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(f"{field} must be a list of non-empty strings")
+    return tuple(dict.fromkeys(item.strip() for item in value))
 
 
 class TermDictionary:
@@ -52,6 +53,7 @@ class TermDictionary:
         generic: tuple[str, ...] = (),
         broad: tuple[str, ...] = (),
         technical: tuple[str, ...] = (),
+        required: tuple[str, ...] = (),
         intents: Mapping[str, tuple[str, ...]] | None = None,
         source: str = "builtin",
         version: str = "builtin-v1",
@@ -60,6 +62,7 @@ class TermDictionary:
         self._generic = generic
         self._broad = broad
         self._technical = technical
+        self._required = required
         self._intents = MappingProxyType(dict(intents or {}))
         self.source = source
         self.version = version
@@ -71,6 +74,7 @@ class TermDictionary:
             generic=_BUILTIN_GENERIC,
             broad=_BUILTIN_BROAD,
             technical=_BUILTIN_TECHNICAL,
+            required=(),
             intents=_BUILTIN_INTENTS,
         )
 
@@ -86,7 +90,9 @@ class TermDictionary:
             entries = {entry.canonical: entry for entry in baseline._entries}
             raw_entities = payload.get("entities", {})
             if isinstance(raw_entities, list):
-                raw_entities = {item.get("canonical"): item for item in raw_entities if isinstance(item, dict)}
+                if any(not isinstance(item, dict) or not isinstance(item.get("canonical"), str) for item in raw_entities):
+                    raise ValueError("invalid entity list")
+                raw_entities = {item["canonical"]: item for item in raw_entities}
             if not isinstance(raw_entities, dict):
                 raise ValueError("entities must be an object or list")
             for canonical, raw in raw_entities.items():
@@ -94,8 +100,10 @@ class TermDictionary:
                     raise ValueError("invalid entity")
                 key = canonical.strip()
                 old = entries.get(key, TermEntry(key, (), ()))
-                aliases = tuple(dict.fromkeys((*old.aliases, *_strings(raw.get("aliases", raw.get("synonyms", ()))))))
-                expansions = tuple(dict.fromkeys((*old.expansions, *_strings(raw.get("expansions", ())))))
+                if "aliases" in raw and "synonyms" in raw:
+                    raise ValueError("entity aliases and synonyms are ambiguous")
+                aliases = tuple(dict.fromkeys((*old.aliases, *_strings(raw.get("aliases", raw.get("synonyms", [])), field="aliases"))))
+                expansions = tuple(dict.fromkeys((*old.expansions, *_strings(raw.get("expansions", []), field="expansions"))))
                 entries[key] = TermEntry(key, aliases or (key,), expansions)
             raw_synonyms = payload.get("synonyms", {})
             if raw_synonyms is not None:
@@ -107,7 +115,7 @@ class TermDictionary:
                     old = entries.get(canonical, TermEntry(canonical, (canonical,), ()))
                     entries[canonical] = TermEntry(
                         canonical,
-                        tuple(dict.fromkeys((*old.aliases, *_strings(values)))),
+                        tuple(dict.fromkeys((*old.aliases, *_strings(values, field="synonyms")))),
                         old.expansions,
                     )
             intents = dict(baseline._intents)
@@ -118,14 +126,15 @@ class TermDictionary:
                 for intent, values in raw_intents.items():
                     if not isinstance(intent, str):
                         raise ValueError("invalid intent")
-                    intents[intent] = tuple(dict.fromkeys((*intents.get(intent, ()), *_strings(values))))
-            generic = tuple(dict.fromkeys((*baseline._generic, *_strings(payload.get("generic_terms")))))
-            broad = tuple(dict.fromkeys((*baseline._broad, *_strings(payload.get("broad_terms")))))
-            technical = tuple(dict.fromkeys((*baseline._technical, *_strings(payload.get("technical_hints")), *_strings(payload.get("required_terms")))))
+                    intents[intent] = tuple(dict.fromkeys((*intents.get(intent, ()), *_strings(values, field="intent_expansions"))))
+            generic = tuple(dict.fromkeys((*baseline._generic, *_strings(payload.get("generic_terms", []), field="generic_terms"))))
+            broad = tuple(dict.fromkeys((*baseline._broad, *_strings(payload.get("broad_terms", []), field="broad_terms"))))
+            technical = tuple(dict.fromkeys((*baseline._technical, *_strings(payload.get("technical_hints", []), field="technical_hints"))))
+            required = _strings(payload.get("required_terms", []), field="required_terms")
             version = payload.get("version", "external-v1")
-            if not isinstance(version, (str, int, float)):
-                raise ValueError("version must be scalar")
-            return cls(tuple(entries.values()), generic=generic, broad=broad, technical=technical, intents=intents, source="external", version=str(version))
+            if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", version):
+                raise ValueError("version must be a safe identifier")
+            return cls(tuple(entries.values()), generic=generic, broad=broad, technical=technical, required=required, intents=intents, source="external", version=version)
         except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
             return baseline
 
@@ -140,6 +149,9 @@ class TermDictionary:
 
     def technical_hints(self) -> tuple[str, ...]:
         return self._technical
+
+    def required_terms(self) -> tuple[str, ...]:
+        return self._required
 
     def synonyms(self) -> Mapping[str, tuple[str, ...]]:
         return MappingProxyType({entry.canonical: entry.aliases for entry in self._entries})

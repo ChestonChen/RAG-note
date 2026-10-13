@@ -151,7 +151,14 @@ def create_app(
             _admin_guard(api_key)
 
     def _debug_payload(question: str, hits: list[Any], context: ContextPackage) -> dict[str, Any]:
-        retrieval_debug_data = getattr(retrieval_service, "latest_debug", {}) or {}
+        get_debug = getattr(retrieval_service, "get_last_debug", None)
+        retrieval_debug_data = get_debug() if callable(get_debug) else getattr(retrieval_service, "latest_debug", {}) or {}
+        query_plan = retrieval_debug_data.get("query_plan", {}) or {}
+        safe_query_plan = {
+            key: query_plan[key]
+            for key in ("intent", "dictionary", "entity_count", "expanded_term_count", "selected_expansion_count")
+            if key in query_plan
+        }
         payload = {
             "normalized_question": " ".join(question.split()),
             "requested_limit": retrieval_debug_data.get("requested_limit", settings.retrieval_context_limit),
@@ -162,6 +169,10 @@ def create_app(
             "fusion_order": retrieval_debug_data.get(
                 "fusion_order", [hit.chunk_id for hit in hits if not getattr(hit, "is_neighbor", False)]
             ),
+            "query_plan": safe_query_plan,
+            "reranker": retrieval_debug_data.get("reranker", {}),
+            "topic_filter": retrieval_debug_data.get("topic_filter", {}),
+            "timings_ms": retrieval_debug_data.get("timings_ms", {}),
             "hits": [hit.model_dump() for hit in hits],
             "context": context.text,
         }

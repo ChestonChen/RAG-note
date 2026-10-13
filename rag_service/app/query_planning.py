@@ -62,6 +62,7 @@ class QueryEntity:
     canonical: str
     matched_alias: str
     expansions: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,20 +79,14 @@ class QueryPlan:
 
     def to_debug_dict(self) -> dict[str, object]:
         return {
-            "normalized_query": self.normalized_query,
-            "rewritten_query": self.rewritten_query,
             "intent": self.intent,
-            "expanded_terms": self.expanded_terms[:32],
-            "entities": [
-                {
-                    "canonical": item.canonical,
-                    "matched_alias": item.matched_alias,
-                    "expansions": list(item.expansions),
-                }
-                for item in self.entities[:8]
-            ],
-            "dictionary": {"source": self.dictionary_source, "version": self.dictionary_version},
-            "selected_expansions": self.selected_expansions[:32],
+            "dictionary": {
+                "source": self.dictionary_source if self.dictionary_source in {"builtin", "external"} else "builtin",
+                "version": self.dictionary_version if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", self.dictionary_version or "") else "unknown",
+            },
+            "entity_count": len(self.entities),
+            "expanded_term_count": len(self.expanded_terms),
+            "selected_expansion_count": len(self.selected_expansions),
         }
 
 
@@ -112,15 +107,16 @@ class QueryPlanner:
             if matched is None or canonical in seen_entities:
                 continue
             seen_entities.add(canonical)
-            entities.append(QueryEntity(canonical, matched, expansions))
+            entities.append(QueryEntity(canonical, matched, expansions, aliases))
             terms.extend((canonical, *aliases, *expansions))
 
         intent = self._intent(normalized)
         intent_expansions = self.dictionary.intent_expansions().get(intent, _INTENT_MARKERS.get(intent, ()))
         terms.extend(intent_expansions)
-        terms.extend(self.dictionary.generic_terms())
-        terms.extend(self.dictionary.broad_terms())
-        terms.extend(self.dictionary.technical_hints())
+        required = list(self.dictionary.required_terms())
+        for value in (*self.dictionary.generic_terms(), *self.dictionary.broad_terms(), *self.dictionary.technical_hints()):
+            if _alias_occurs(value, normalized):
+                terms.append(value)
         selected_expansions = self._dedupe(
             [entity.canonical for entity in entities]
             + [value for entity in entities for value in entity.expansions]
@@ -129,8 +125,10 @@ class QueryPlanner:
         # Preserve meaningful raw tokens even if they are not in the compact
         # dictionary; this improves exact identifier matching.
         terms.extend(re.findall(r"[a-z0-9_+#:.\-/]{2,}|[\u4e00-\u9fff]{2,}", normalized))
-        expanded = self._dedupe(terms)[:40]
-        rewritten = " ".join(self._dedupe([normalized, *expanded[:24]]))
+        expanded = self._dedupe([*required, *terms])[:40]
+        budget = 24
+        selected = self._dedupe([normalized, *required, *expanded])
+        rewritten = " ".join(selected[: budget + 1 + len(required)])
         return QueryPlan(
             original_query=str(question or ""),
             normalized_query=normalized,
