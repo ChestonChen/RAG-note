@@ -25,7 +25,7 @@ def main() -> int:
     try:
         result = rebuild_derived_index(get_settings(), confirm=args.confirm)
     except Exception as exc:
-        print(f"reindex failed: {exc}", file=sys.stderr)
+        print(f"reindex failed ({exc.__class__.__name__})", file=sys.stderr)
         return 1
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result.get("status") == "completed" else 2

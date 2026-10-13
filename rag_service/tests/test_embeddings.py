@@ -174,3 +174,28 @@ def test_remote_provider_rejects_returned_dimension_mismatch():
 
     with pytest.raises(RuntimeError, match="unexpected dimension"):
         provider.embed_texts(["probe"])
+
+
+def test_remote_provider_redacts_exception_details():
+    from rag_service.app.embeddings import OpenAICompatibleEmbeddingProvider
+
+    class ExplodingEmbeddings:
+        def create(self, **kwargs):
+            raise RuntimeError(
+                "authorization=secret-token https://provider.example/v1?key=secret-key"
+            )
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        base_url="https://embedding.example/v1",
+        api_key="secret-token",
+        model="BAAI/bge-m3",
+        dimensions=4,
+        client=types.SimpleNamespace(embeddings=ExplodingEmbeddings()),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        provider.embed_texts(["probe"])
+    assert "RuntimeError" in str(error.value)
+    assert "secret-token" not in str(error.value)
+    assert "secret-key" not in str(error.value)
+    assert "provider.example" not in str(error.value)

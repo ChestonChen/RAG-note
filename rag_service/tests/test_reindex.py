@@ -90,4 +90,71 @@ def test_rebuild_summary_is_serializable_and_preserves_source_root(tmp_path, mon
     assert result["status"] == "completed"
     assert result["source_root"] == str(root.resolve())
     assert result["ingestion"]["processed_files"] == 1
+    assert result["active_embedding_signature"] == settings.embedding_signature()
     assert (root / "note.md").read_text(encoding="utf-8") == "source"
+
+
+def test_rebuild_refuses_opaque_factory_instead_of_resetting_settings_database(monkeypatch):
+    from rag_service.app.config import Settings
+    from rag_service.app import reindex
+
+    settings = Settings(
+        database_url="postgresql+psycopg://rag:rag@localhost/should-not-be-used",
+        embedding_dimensions=8,
+    )
+    monkeypatch.setattr(
+        reindex,
+        "create_embedding_provider",
+        lambda _settings: FakeEmbeddingProvider([[1.0] + [0.0] * 7]),
+    )
+    monkeypatch.setattr(
+        reindex,
+        "get_engine",
+        lambda *_args, **_kwargs: pytest.fail("must not infer another database"),
+    )
+    dropped = []
+    monkeypatch.setattr(reindex, "_drop_derived_objects", lambda *args: dropped.append(args))
+
+    with pytest.raises(ValueError, match="session_factory.*database bind"):
+        reindex.rebuild_derived_index(settings, confirm=True, session_factory=lambda: object())
+
+    assert dropped == []
+
+
+def test_partial_rebuild_does_not_claim_new_signature_is_active(tmp_path, monkeypatch):
+    from rag_service.app.config import Settings
+    from rag_service.app import reindex
+
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    settings = Settings(
+        knowledge_root=root,
+        database_url="sqlite+pysqlite:///:memory:",
+        embedding_dimensions=8,
+        embedding_model="new-model",
+    )
+    fake_summary = SimpleNamespace(
+        scanned_files=2,
+        processed_files=1,
+        skipped_files=0,
+        failed_files=1,
+        deleted_documents=0,
+        chunk_count=1,
+        job_id=8,
+    )
+    monkeypatch.setattr(
+        reindex,
+        "create_embedding_provider",
+        lambda _settings: FakeEmbeddingProvider([[1.0] + [0.0] * 7]),
+    )
+    monkeypatch.setattr(reindex, "_drop_derived_objects", lambda *args: [])
+    monkeypatch.setattr(reindex, "init_db", lambda *args, **kwargs: None)
+    monkeypatch.setattr(reindex, "get_session_factory", lambda _settings: object())
+    monkeypatch.setattr(reindex, "_factory_engine", lambda _settings, _factory: object())
+    monkeypatch.setattr(reindex.IngestionService, "scan", lambda self, force=False: fake_summary)
+
+    result = reindex.rebuild_derived_index(settings, confirm=True)
+
+    assert result["status"] == "completed_with_errors"
+    assert result["active_embedding_signature"] is None
+    assert result["recoverability"]

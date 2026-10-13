@@ -155,3 +155,29 @@ def test_vector_dimension_mismatch_marks_source_failed_without_partial_chunks(tm
         assert document.status == "failed"
         assert "EMBEDDING_DIMENSIONS=384" in (document.error_message or "")
         assert session.query(Chunk).count() == 0
+
+
+def test_embedding_provider_error_is_redacted_from_document_and_logs(tmp_path, caplog):
+    class ExplodingProvider(FakeEmbeddingProvider):
+        def embed_texts(self, texts):
+            raise RuntimeError(
+                "authorization=secret-token https://provider.example/v1?key=secret-key"
+            )
+
+    knowledge, service, factory = _service(tmp_path)
+    service.embedding_provider = ExplodingProvider()
+    source = knowledge / "remote.md"
+    source.write_text("body", encoding="utf-8")
+
+    summary = service.scan()
+
+    assert summary.failed_files == 1
+    with factory() as session:
+        error = session.query(Document).one().error_message or ""
+    assert "secret-token" not in error
+    assert "secret-key" not in error
+    assert "provider.example" not in error
+    assert "secret-token" not in caplog.text
+    assert "secret-key" not in caplog.text
+    assert "provider.example" not in caplog.text
+    assert "RuntimeError" in error

@@ -25,6 +25,20 @@ class EmbeddingProvider(Protocol):
         """Embed one query text."""
 
 
+class EmbeddingProviderError(RuntimeError):
+    """A provider failure with a safe, non-sensitive public message."""
+
+
+def safe_embedding_error(error: Exception) -> EmbeddingProviderError:
+    """Reduce arbitrary provider exceptions to their type, never their text."""
+
+    if isinstance(error, EmbeddingProviderError):
+        return error
+    return EmbeddingProviderError(
+        f"embedding provider request failed ({error.__class__.__name__})"
+    )
+
+
 _TOKEN_RE = re.compile(r"[\w]+|[^\W\s]", re.UNICODE)
 
 
@@ -140,7 +154,10 @@ class OpenAICompatibleEmbeddingProvider:
         # example BGE gateways) reject it; we validate the returned length
         # instead and keep the database schema explicit via Settings.
         request: dict[str, Any] = {"model": self.model, "input": texts}
-        response = self.client.embeddings.create(**request)
+        try:
+            response = self.client.embeddings.create(**request)
+        except Exception as exc:
+            raise safe_embedding_error(exc) from None
         data = list(getattr(response, "data", []) or [])
         if len(data) != len(texts):
             raise RuntimeError(
@@ -220,9 +237,7 @@ class SentenceTransformersEmbeddingProvider:
             try:
                 model = SentenceTransformer(str(model_dir), device=self.device)
             except Exception as exc:
-                raise RuntimeError(
-                    f"failed to load sentence-transformers model from {self.model_path}: {exc}"
-                ) from exc
+                raise safe_embedding_error(exc) from None
             self._model_cache[key] = model
             return model
 
@@ -252,7 +267,7 @@ class SentenceTransformersEmbeddingProvider:
                 convert_to_numpy=True,
             )
         except Exception as exc:
-            raise RuntimeError(f"sentence-transformers failed to encode input: {exc}") from exc
+            raise safe_embedding_error(exc) from None
         vectors = self._as_vectors(encoded)
         if len(vectors) != len(texts):
             raise RuntimeError(
@@ -301,6 +316,7 @@ build_embedding_provider = create_embedding_provider
 
 __all__ = [
     "EmbeddingProvider",
+    "EmbeddingProviderError",
     "HashingEmbedding",
     "HashingEmbeddingProvider",
     "HashEmbeddingProvider",
@@ -308,4 +324,5 @@ __all__ = [
     "SentenceTransformersEmbeddingProvider",
     "build_embedding_provider",
     "create_embedding_provider",
+    "safe_embedding_error",
 ]

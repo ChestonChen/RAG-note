@@ -96,10 +96,33 @@ def validate_embedding_provider(
 
 
 def _factory_engine(settings: Settings, factory: Callable[[], Session] | Any):
-    bind = getattr(factory, "bind", None)
-    if bind is None:
-        bind = getattr(factory, "kw", {}).get("bind")
-    return bind or get_engine(settings)
+    session = None
+    try:
+        if callable(factory):
+            session = factory()
+            get_bind = getattr(session, "get_bind", None)
+            if callable(get_bind):
+                try:
+                    bind = get_bind()
+                except Exception:
+                    bind = None
+                if bind is not None:
+                    return bind
+            bind = getattr(session, "bind", None)
+            if bind is not None:
+                return bind
+        bind = getattr(factory, "bind", None)
+        if bind is None:
+            bind = getattr(factory, "kw", {}).get("bind")
+        if bind is not None:
+            return bind
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            close()
+    raise ValueError(
+        "session_factory does not expose its actual database bind; refusing destructive rebuild"
+    )
 
 
 def _drop_derived_objects(settings: Settings, engine: Any | None = None) -> list[str]:
@@ -142,7 +165,7 @@ def rebuild_derived_index(
         "status": "validation_failed" if not validation.ok else "pending",
         "source_root": source_root,
         "embedding_signature": settings.embedding_signature(),
-        "active_embedding_signature": settings.embedding_signature(),
+        "active_embedding_signature": None,
         "validation": validation.to_dict(),
         "dropped_tables": [],
         "ingestion": None,
@@ -163,7 +186,19 @@ def rebuild_derived_index(
         embedding_provider=provider,
     ).scan(force=True)
     result["ingestion"] = _summary_mapping(summary)
-    result["status"] = "completed" if not getattr(summary, "failed_files", 0) else "completed_with_errors"
+    scanned = int(getattr(summary, "scanned_files", 0) or 0)
+    processed = int(getattr(summary, "processed_files", 0) or 0)
+    skipped = int(getattr(summary, "skipped_files", 0) or 0)
+    failed = int(getattr(summary, "failed_files", 0) or 0)
+    source_root_path = settings.resolved_knowledge_root()
+    scan_complete = source_root_path.is_dir() and processed + skipped + failed == scanned
+    if scan_complete and failed == 0:
+        result["status"] = "completed"
+        result["active_embedding_signature"] = settings.embedding_signature()
+        result["recoverability"] = None
+    else:
+        result["status"] = "completed_with_errors" if failed else "incomplete"
+        result["active_embedding_signature"] = None
     return result
 
 

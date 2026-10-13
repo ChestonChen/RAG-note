@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .db import get_session_factory
-from .embeddings import EmbeddingProvider, create_embedding_provider
+from .embeddings import EmbeddingProvider, create_embedding_provider, safe_embedding_error
 from .models import Chunk, Document, IngestionJob
 
 logger = logging.getLogger(__name__)
@@ -334,7 +334,10 @@ class IngestionService:
                         heading_path = _heading_path(item)
                         heading_context = " > ".join(heading_path)
                         texts.append(f"{heading_context}\n\n{content}" if heading_context else content)
-                    vectors = self.embedding_provider.embed_texts(texts) if texts else []
+                    try:
+                        vectors = self.embedding_provider.embed_texts(texts) if texts else []
+                    except Exception as error:
+                        raise safe_embedding_error(error) from None
                     if len(vectors) != len(payloads):
                         raise RuntimeError(
                             f"embedding provider returned {len(vectors)} vectors for {len(payloads)} chunks"
