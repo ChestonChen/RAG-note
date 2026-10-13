@@ -25,6 +25,11 @@ class RecordingEmbeddingProvider(FakeEmbeddingProvider):
     pass
 
 
+class WrongDimensionEmbeddingProvider(FakeEmbeddingProvider):
+    def __init__(self) -> None:
+        super().__init__(dimensions=8)
+
+
 def _service(tmp_path, parser=None, chunker=None):
     knowledge = tmp_path / "knowledge"
     knowledge.mkdir()
@@ -133,3 +138,20 @@ def test_embedding_receives_heading_context_but_chunk_content_stays_body(tmp_pat
         chunk = session.query(Chunk).one()
         assert chunk.content == "Body text."
         assert chunk.heading_path == ["Guide", "Setup"]
+
+
+def test_vector_dimension_mismatch_marks_source_failed_without_partial_chunks(tmp_path):
+    knowledge, service, factory = _service(tmp_path)
+    service.embedding_provider = WrongDimensionEmbeddingProvider()
+    source = knowledge / "wrong-dimension.md"
+    source.write_text("body", encoding="utf-8")
+
+    summary = service.scan()
+
+    assert summary.processed_files == 0
+    assert summary.failed_files == 1
+    with factory() as session:
+        document = session.query(Document).one()
+        assert document.status == "failed"
+        assert "EMBEDDING_DIMENSIONS=384" in (document.error_message or "")
+        assert session.query(Chunk).count() == 0

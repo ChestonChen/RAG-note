@@ -133,3 +133,44 @@ def test_sentence_transformers_provider_rejects_unexpected_dimension(monkeypatch
 
     with pytest.raises(RuntimeError, match="unexpected vector dimension"):
         provider.embed_texts(["hello"])
+
+
+def test_remote_provider_configuration_keeps_endpoint_and_model_without_secret_in_repr():
+    from rag_service.app.config import Settings
+    from rag_service.app.embeddings import OpenAICompatibleEmbeddingProvider, create_embedding_provider
+
+    provider = create_embedding_provider(
+        Settings(
+            embedding_provider="openai_compatible",
+            embedding_base_url="https://embedding.example/v1",
+            embedding_api_key="super-secret",
+            embedding_model="BAAI/bge-m3",
+            embedding_dimensions=1024,
+        )
+    )
+
+    assert isinstance(provider, OpenAICompatibleEmbeddingProvider)
+    assert provider.base_url == "https://embedding.example/v1"
+    assert provider.model == "BAAI/bge-m3"
+    assert "super-secret" not in repr(provider)
+
+
+def test_remote_provider_rejects_returned_dimension_mismatch():
+    from rag_service.app.embeddings import OpenAICompatibleEmbeddingProvider
+
+    class FakeEmbeddings:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(
+                data=[types.SimpleNamespace(index=0, embedding=[0.1, 0.2])]
+            )
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        base_url="https://embedding.example/v1",
+        api_key="secret",
+        model="BAAI/bge-m3",
+        dimensions=4,
+        client=types.SimpleNamespace(embeddings=FakeEmbeddings()),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected dimension"):
+        provider.embed_texts(["probe"])

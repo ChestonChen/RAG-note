@@ -12,11 +12,17 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Iterator
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
-from .models import Base, configure_embedding_dimensions
+from .models import Base, Chunk, Document, IngestionJob, configure_embedding_dimensions
+
+
+# pgvector's standard ``vector`` type supports HNSW indexes up to 2,000
+# dimensions. Higher-dimensional providers can still use stored vectors and
+# lexical retrieval; they simply skip this optional index.
+_PGVECTOR_HNSW_MAX_DIMENSIONS = 2000
 
 
 def get_engine(settings: Settings | None = None, *, database_url: str | None = None) -> Engine:
@@ -105,6 +111,37 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        # Keep the two expensive retrieval channels index-backed once the
+        # knowledge base grows beyond the local smoke-test size.  These are
+        # idempotent and can also be created by rerunning init_db.py after an
+        # existing database has been populated.
+        with engine.begin() as connection:
+            if settings.embedding_dimensions <= _PGVECTOR_HNSW_MAX_DIMENSIONS:
+                connection.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_chunks_embedding_hnsw "
+                        "ON chunks USING hnsw (embedding vector_cosine_ops)"
+                    )
+                )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chunks_content_trgm "
+                    "ON chunks USING gin (content gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_documents_title_trgm "
+                    "ON documents USING gin (title gin_trgm_ops)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_documents_source_path_trgm "
+                    "ON documents USING gin (source_path gin_trgm_ops)"
+                )
+            )
     return engine
 
 
@@ -113,3 +150,22 @@ def dispose_cached_engines() -> None:
     # ``cache_info`` does not expose cached values.  Clearing the cache still
     # releases references to session factories and their engines.
     _cached_session_factory.cache_clear()
+
+
+def drop_derived_tables(engine: Engine) -> list[str]:
+    """Drop only rebuildable index tables while preserving source files."""
+
+    derived_tables = (Chunk.__table__, Document.__table__, IngestionJob.__table__)
+    removed: list[str] = []
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            for table in derived_tables:
+                connection.execute(text(f"DROP TABLE IF EXISTS {table.name} CASCADE"))
+                removed.append(table.name)
+        return removed
+    with engine.begin() as connection:
+        for table in derived_tables:
+            if inspect(connection).has_table(table.name):
+                table.drop(connection, checkfirst=True)
+                removed.append(table.name)
+    return removed

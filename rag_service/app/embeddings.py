@@ -42,6 +42,8 @@ class HashingEmbeddingProvider:
             raise ValueError("embedding dimensions must be at least 8")
         self.dimensions = dimensions
         self.seed = seed
+        self.provider_name = "hashing"
+        self.model = "feature-hashing"
 
     def _features(self, text: str) -> list[tuple[str, float]]:
         normalized = " ".join(text.strip().lower().split())
@@ -108,6 +110,7 @@ class OpenAICompatibleEmbeddingProvider:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.provider_name = "openai_compatible"
         self.dimensions = dimensions
         self.timeout = timeout
         self._client = client
@@ -192,6 +195,8 @@ class SentenceTransformersEmbeddingProvider:
         self.dimensions = dimensions
         self.batch_size = batch_size
         self.device = device
+        self.provider_name = "sentence_transformers"
+        self.model = model_path
 
     @property
     def _cache_key(self) -> tuple[str, str]:
@@ -277,8 +282,10 @@ def create_embedding_provider(settings: Settings | None = None) -> EmbeddingProv
         )
     if not settings.embedding_api_key:
         raise ValueError("EMBEDDING_API_KEY must be set when EMBEDDING_PROVIDER=openai_compatible")
+    if not settings.embedding_base_url:
+        raise ValueError("EMBEDDING_BASE_URL must be set when EMBEDDING_PROVIDER=openai_compatible")
     return OpenAICompatibleEmbeddingProvider(
-        base_url=settings.embedding_base_url or settings.llm_base_url,
+        base_url=settings.embedding_base_url,
         api_key=settings.embedding_api_key,
         model=settings.embedding_model,
         dimensions=settings.embedding_dimensions,

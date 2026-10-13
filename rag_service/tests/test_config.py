@@ -50,3 +50,82 @@ def test_section_aware_chunking_signature_reindexes_legacy_chunks():
         chunking_signature=settings.chunking_signature(),
         embedding_signature=settings.embedding_signature(),
     )
+
+
+def test_settings_expose_optional_postgres_trigram_channel():
+    from rag_service.app.config import Settings
+
+    settings = Settings()
+
+    assert settings.retrieval_trigram_candidates == 30
+    assert settings.retrieval_trigram_rrf_weight == 0.5
+    assert settings.retrieval_vector_min_score == 0.12
+    assert settings.retrieval_trigram_min_similarity == 0.1
+
+
+def test_embedding_signature_changes_when_provider_model_or_dimension_changes():
+    from rag_service.app.config import Settings
+
+    baseline = Settings()
+    assert baseline.embedding_signature() != Settings(
+        embedding_provider="openai_compatible",
+        embedding_api_key="secret",
+        embedding_model=baseline.embedding_model,
+        embedding_dimensions=baseline.embedding_dimensions,
+    ).embedding_signature()
+    assert baseline.embedding_signature() != Settings(
+        embedding_model="another-model",
+        embedding_dimensions=baseline.embedding_dimensions,
+    ).embedding_signature()
+    assert baseline.embedding_signature() != Settings(
+        embedding_dimensions=baseline.embedding_dimensions + 1,
+    ).embedding_signature()
+
+
+def test_init_db_skips_hnsw_for_dimensions_above_pgvector_limit(monkeypatch):
+    from rag_service.app import db
+    from rag_service.app.config import Settings
+    from rag_service.app.models import Chunk
+
+    class FakeConnection:
+        def __init__(self, statements):
+            self.statements = statements
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def execute(self, statement):
+            self.statements.append(str(statement))
+
+    class FakeEngine:
+        class Dialect:
+            name = "postgresql"
+
+        dialect = Dialect()
+
+        def __init__(self):
+            self.statements = []
+
+        def begin(self):
+            return FakeConnection(self.statements)
+
+    engine = FakeEngine()
+    monkeypatch.setattr(db.Base.metadata, "create_all", lambda _engine: None)
+
+    original_dimensions = Chunk.__table__.c.embedding.type.dimensions
+    try:
+        db.init_db(
+            engine,
+            settings=Settings(
+                database_url="postgresql+psycopg://rag:rag@localhost/ragdb",
+                embedding_dimensions=2048,
+            ),
+        )
+    finally:
+        Chunk.__table__.c.embedding.type.dimensions = original_dimensions
+
+    assert not any("embedding_hnsw" in statement for statement in engine.statements)
+    assert any("chunks_content_trgm" in statement for statement in engine.statements)
