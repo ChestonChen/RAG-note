@@ -171,6 +171,7 @@ def create_app(
             ),
             "query_plan": safe_query_plan,
             "reranker": retrieval_debug_data.get("reranker", {}),
+            "evidence": context.evidence.model_dump(),
             "topic_filter": retrieval_debug_data.get("topic_filter", {}),
             "timings_ms": retrieval_debug_data.get("timings_ms", {}),
             "hits": [hit.model_dump() for hit in hits],
@@ -372,7 +373,10 @@ def create_app(
 
                 debug = _debug_payload(request.question, hits, context)
                 debug["web_search"] = web_search_status
-                should_generate = bool(hits and score >= settings.low_confidence_threshold) or used_web_search
+                should_generate = bool(
+                    (hits and context.evidence.eligible_citation_count and score >= settings.low_confidence_threshold)
+                    or used_web_search
+                )
                 confidence = "high" if score >= 0.65 else "medium"
                 mode = "kb_plus_web" if used_web_search and hits else "web_only" if used_web_search else "kb_only"
                 if not should_generate:
@@ -651,6 +655,7 @@ def create_app(
             **_debug_payload(request.question, hits, context),
             "citations": [citation.model_dump() for citation in context.citations],
             "confidence_score": context.confidence_score,
+            "evidence": context.evidence.model_dump(),
         }
         return payload
 
@@ -675,7 +680,10 @@ def create_app(
 
         debug = _debug_payload(request.question, hits, context)
         debug["web_search"] = web_search_status
-        should_generate = bool(hits and score >= settings.low_confidence_threshold) or used_web_search
+        should_generate = bool(
+            (hits and context.evidence.eligible_citation_count and score >= settings.low_confidence_threshold)
+            or used_web_search
+        )
         if not should_generate:
             answer = _answer_low_evidence(context)
             confidence = "low"

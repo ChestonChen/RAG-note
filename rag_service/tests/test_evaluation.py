@@ -85,12 +85,14 @@ def test_evaluate_cases_calculates_source_metrics_and_unknown_false_positives():
         "mrr": 0.75,
         "mean_source_recall_at_5": 1.0,
         "citation_source_coverage": 1.0,
-        "unknown_false_positive_rate": 1.0,
+        "unknown_false_positive_rate": 0.0,
     }
     unknown = next(case for case in report["cases"] if case["id"] == "unknown")
     assert unknown["primary_hits"][0]["source"] == "d.md"
     assert unknown["neighbor_hits"] == []
-    assert unknown["confidence_score"] == 0.4
+    assert unknown["confidence_score"] == ContextBuilder().build(
+        "unknown", retrieval.responses["unknown"]
+    ).evidence.score
 
 
 def test_load_cases_reads_jsonl_and_skips_blank_lines(tmp_path: Path):

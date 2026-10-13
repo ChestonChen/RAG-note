@@ -47,6 +47,19 @@ class SearchHit(BaseModel):
     rerank_score: float | None = None
 
 
+class EvidenceReport(BaseModel):
+    score: float = Field(ge=0, le=1)
+    direct_hit_count: int = Field(ge=0)
+    eligible_citation_count: int = Field(ge=0)
+    channel_agreement: float = Field(ge=0, le=1)
+    term_coverage: float = Field(ge=0, le=1)
+    metadata_alignment: float = Field(ge=0, le=1)
+    score_gap: float = Field(ge=0, le=1)
+    document_diversity: float = Field(ge=0, le=1)
+    caps: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
 class IngestRequest(BaseModel):
     force: bool = False
 

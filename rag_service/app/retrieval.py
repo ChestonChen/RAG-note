@@ -353,7 +353,11 @@ class RetrievalService:
             },
             "fusion_order": [],
             "query_plan": {},
-            "reranker": {"enabled": bool(self.settings.reranker_enabled), "attempted": False, "status": "disabled"},
+            "reranker": {
+                "enabled": bool(self.settings.reranker_enabled),
+                "attempted": False,
+                "status": "no_discrimination" if self.reranker is not None else "disabled",
+            },
             "topic_filter": {"enabled": False, "applied": False, "filtered_count": 0},
             "timings_ms": {},
         }
@@ -539,7 +543,7 @@ class RetrievalService:
             "reranker": {
                 "enabled": bool(self.settings.reranker_enabled),
                 "attempted": False,
-                "status": "disabled" if self.reranker is None else "ready",
+                "status": "disabled" if self.reranker is None else "no_discrimination",
             },
             "topic_filter": {"enabled": bool(plan.entities), "applied": False, "filtered_count": 0},
             "timings_ms": {},
@@ -867,8 +871,9 @@ class RetrievalService:
             scores = list(self.reranker.rerank(question, documents))
             if len(scores) != len(candidate_ids):
                 raise RuntimeError("reranker returned an unexpected number of scores")
-            finite = [float(score) for score in scores if math.isfinite(float(score))]
-            if len(finite) != len(scores) or not finite:
+            converted = [float(score) for score in scores]
+            finite = [score for score in converted if math.isfinite(score)]
+            if len(finite) != len(converted) or not finite:
                 raise RuntimeError("reranker returned non-finite scores")
             low, high = min(finite), max(finite)
             scale = high - low
@@ -876,8 +881,7 @@ class RetrievalService:
                 debug["status"] = "no_discrimination"
                 debug["scores"] = {}
                 return ranked
-            for item_id, score in zip(candidate_ids, scores):
-                value = float(score)
+            for item_id, value in zip(candidate_ids, converted):
                 normalized_score = (value - low) / scale
                 candidates[item_id].rerank_score = max(0.0, min(1.0, normalized_score))
             rerank_scores = {
@@ -899,7 +903,9 @@ class RetrievalService:
             )
         except Exception as exc:
             debug["status"] = "failed_open" if self.settings.reranker_fail_open else "failed"
-            debug["error"] = str(exc)[:200]
+            # Provider exception text can contain URLs, response bodies, or
+            # credentials. Persist only the exception class, never its body.
+            debug["error"] = type(exc).__name__
             if not self.settings.reranker_fail_open:
                 raise
             return ranked

@@ -12,6 +12,30 @@ from rag_service.app.search_text import (
     deterministic_cjk_ngrams,
 )
 from rag_service.app.term_dictionary import TermDictionary
+from rag_service.app.reranker import CrossEncoderReranker, create_reranker
+
+
+def test_reranker_configuration_enables_lazy_bounded_cross_encoder():
+    settings = Settings(
+        reranker_enabled=True,
+        reranker_model="example/model",
+        reranker_device="cpu",
+        reranker_batch_size=2,
+        reranker_candidates=7,
+        reranker_max_chars=640,
+    )
+
+    reranker = create_reranker(settings)
+
+    assert isinstance(reranker, CrossEncoderReranker)
+    assert reranker.model_name == "example/model"
+    assert reranker.batch_size == 2
+    assert reranker.max_chars == 640
+    assert reranker._model is None
+
+
+def test_disabled_reranker_configuration_does_not_construct_adapter():
+    assert create_reranker(Settings(reranker_enabled=False)) is None
 
 
 def test_exact_and_full_text_channels_are_independent_on_sqlite():
@@ -674,6 +698,167 @@ def test_context_builder_adds_stable_citation_labels():
     assert len(package.citations) == 1
     assert package.citations[0].citation_id == "DOC-1"
     assert package.confidence_score > 0
+
+
+def test_context_evidence_report_excludes_neighbor_only_hits_from_confidence_and_citations():
+    neighbor = SearchHit(
+        chunk_id=100,
+        content="Adjacent context with a very high retrieval score.",
+        source="knowledge/adjacent.md",
+        title="Adjacent",
+        score=0.99,
+        matched_channels=["neighbor"],
+        is_neighbor=True,
+    )
+
+    package = ContextBuilder().build("unrelated question", [neighbor])
+
+    assert package.evidence.direct_hit_count == 0
+    assert package.evidence.eligible_citation_count == 0
+    assert package.evidence.score == 0
+    assert package.confidence_score == 0
+    assert package.citations == []
+    assert package.hits == [neighbor]
+
+
+def test_context_evidence_report_caps_weak_body_only_hits():
+    weak = SearchHit(
+        chunk_id=101,
+        content="A generic body mention without a topic heading.",
+        source="knowledge/generic.md",
+        title="Generic",
+        score=0.95,
+        matched_channels=["vector"],
+        topic_match="body_only",
+        topic_score=0.2,
+    )
+
+    package = ContextBuilder().build("specific topic", [weak])
+
+    assert package.evidence.caps
+    assert package.evidence.score <= 0.35
+    assert package.confidence_score == package.evidence.score
+    assert package.evidence.eligible_citation_count == 0
+    assert package.citations == []
+
+
+def test_exact_and_phrase_evidence_improve_bounded_confidence():
+    plain = SearchHit(
+        chunk_id=102,
+        content="The topic is discussed in this note.",
+        source="knowledge/plain.md",
+        title="Plain",
+        score=0.6,
+        matched_channels=["vector"],
+    )
+    exact_phrase = SearchHit(
+        chunk_id=103,
+        content="The exact phrase explains the topic.",
+        source="knowledge/exact.md",
+        title="Exact",
+        score=0.6,
+        matched_channels=["vector", "phrase", "exact"],
+        phrase_score=1.0,
+        exact_score=1.0,
+        matched_terms=["topic"],
+    )
+
+    plain_package = ContextBuilder().build("topic", [plain])
+    exact_package = ContextBuilder().build("topic", [exact_phrase])
+
+    assert exact_package.evidence.score > plain_package.evidence.score
+    assert 0 <= exact_package.evidence.score <= 1
+    assert exact_package.evidence.eligible_citation_count == 1
+
+
+def test_context_citations_exclude_neighbor_and_weak_hits_but_keep_strong_hit():
+    strong = SearchHit(
+        chunk_id=104,
+        content="The heading directly answers the question.",
+        source="knowledge/strong.md",
+        title="Strong",
+        heading=["Topic"],
+        score=0.8,
+        matched_channels=["keyword", "phrase"],
+        phrase_score=1.0,
+    )
+    weak = SearchHit(
+        chunk_id=105,
+        content="A generic body mention.",
+        source="knowledge/weak.md",
+        title="Weak",
+        score=0.8,
+        matched_channels=["vector"],
+        topic_match="body_only",
+    )
+    neighbor = SearchHit(
+        chunk_id=106,
+        content="Neighbor context.",
+        source="knowledge/neighbor.md",
+        title="Neighbor",
+        score=0.8,
+        matched_channels=["neighbor"],
+        is_neighbor=True,
+    )
+
+    package = ContextBuilder().build("topic", [strong, weak, neighbor])
+
+    assert [citation.source for citation in package.citations] == ["knowledge/strong.md"]
+    assert package.evidence.eligible_citation_count == 1
+    assert len(package.hits) == 3
+
+
+def test_reranker_exception_debug_redacts_provider_error_body():
+    class BrokenReranker:
+        def rerank(self, query: str, documents: list[str]) -> list[float]:
+            raise RuntimeError("provider-secret-token https://private.example/model")
+
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        retrieval_context_limit=1,
+        retrieval_neighbor_window=0,
+        reranker_enabled=True,
+        reranker_fail_open=True,
+    )
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    with factory() as session:
+        document = Document(
+            source_path="rerank-redact.md",
+            source_type="markdown",
+            title="Rerank redact",
+            file_hash="8" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add(document)
+        session.flush()
+        session.add(
+            Chunk(
+                document_id=document.id,
+                chunk_index=0,
+                content="reranker redaction fixture",
+                heading_path=["Rerank"],
+                token_count=3,
+                embedding=provider.embed_query("reranker redaction fixture"),
+            )
+        )
+        session.commit()
+
+    service = RetrievalService(
+        factory,
+        settings=settings,
+        embedding_provider=provider,
+        reranker=BrokenReranker(),
+    )
+    assert service.search("reranker redaction fixture")
+    debug = service.get_last_debug()["reranker"]
+    assert debug["status"] == "failed_open"
+    assert "provider-secret-token" not in str(debug)
+    assert "private.example" not in str(debug)
 
 
 def test_retrieval_adds_a_small_adjacent_chunk_window():

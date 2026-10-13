@@ -97,6 +97,59 @@ def test_low_confidence_can_use_web_fallback_and_expose_sources(tmp_path):
     assert generation.calls[0][1].web_sources
 
 
+def test_retrieval_debug_persists_evidence_report(tmp_path):
+    settings = _sqlite_settings(tmp_path)
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    app = create_app(
+        settings,
+        retrieval_service=_FakeRetrieval([_hit()]),
+        ingestion_service=_FakeIngestion(),
+        generation_service=_FakeGeneration(),
+        session_factory=factory,
+    )
+
+    response = TestClient(app).post(
+        "/v1/retrieval/debug",
+        json={"question": "pgvector 是什么"},
+    )
+
+    assert response.status_code == 200
+    evidence = response.json()["evidence"]
+    assert evidence["direct_hit_count"] == 1
+    assert evidence["eligible_citation_count"] == 1
+    assert 0 <= evidence["score"] <= 1
+
+
+def test_weak_only_evidence_abstains_without_calling_answer_model(tmp_path):
+    class MustNotGenerate:
+        def generate(self, question, context):
+            raise AssertionError("weak-only evidence must not reach the answer model")
+
+    settings = _sqlite_settings(tmp_path)
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    weak_hit = _hit(score=0.95).model_copy(update={"topic_match": "body_only"})
+    app = create_app(
+        settings,
+        retrieval_service=_FakeRetrieval([weak_hit]),
+        ingestion_service=_FakeIngestion(),
+        generation_service=MustNotGenerate(),
+        session_factory=factory,
+    )
+
+    response = TestClient(app).post(
+        "/v1/qa/ask",
+        json={"question": "pgvector 是什么", "allow_web_fallback": False},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["confidence"] == "low"
+    assert body["citations"] == []
+    assert body["retrieval_debug"]["evidence"]["caps"]
+
+
 def test_qa_answer_is_persisted_to_log(tmp_path):
     settings = _sqlite_settings(tmp_path)
     engine = init_db(get_engine(settings), settings=settings)
@@ -117,6 +170,7 @@ def test_qa_answer_is_persisted_to_log(tmp_path):
         assert log.question == "pgvector 是什么"
         assert log.answer == "基于证据的回答 [DOC-1]"
         assert log.citations
+        assert log.retrieval_debug["evidence"]["direct_hit_count"] == 1
 
 
 def test_admin_ingest_requires_configured_api_key(tmp_path):

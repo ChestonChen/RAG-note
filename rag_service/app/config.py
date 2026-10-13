@@ -107,11 +107,17 @@ class Settings(BaseSettings):
         default="BAAI/bge-reranker-v2-m3", validation_alias="RERANKER_MODEL"
     )
     reranker_device: str = Field(default="cpu", min_length=1, validation_alias="RERANKER_DEVICE")
-    reranker_batch_size: int = Field(default=4, ge=1, validation_alias="RERANKER_BATCH_SIZE")
-    reranker_candidates: int = Field(default=24, ge=1, validation_alias="RERANKER_CANDIDATES")
-    reranker_max_chars: int = Field(default=1200, ge=128, validation_alias="RERANKER_MAX_CHARS")
+    reranker_batch_size: int = Field(default=4, ge=1, le=128, validation_alias="RERANKER_BATCH_SIZE")
+    reranker_candidates: int = Field(default=24, ge=1, le=100, validation_alias="RERANKER_CANDIDATES")
+    reranker_max_chars: int = Field(default=1200, ge=128, le=10000, validation_alias="RERANKER_MAX_CHARS")
     reranker_weight: float = Field(default=0.35, ge=0, validation_alias="RERANKER_WEIGHT")
     reranker_fail_open: bool = Field(default=True, validation_alias="RERANKER_FAIL_OPEN")
+    evidence_weak_score_cap: float = Field(
+        default=0.35, ge=0, le=1, validation_alias="EVIDENCE_WEAK_SCORE_CAP"
+    )
+    evidence_min_citation_score: float = Field(
+        default=0.20, ge=0, le=1, validation_alias="EVIDENCE_MIN_CITATION_SCORE"
+    )
     low_confidence_threshold: float = Field(default=0.28, ge=0, le=1, validation_alias="LOW_CONFIDENCE_THRESHOLD")
 
     @property

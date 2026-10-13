@@ -91,6 +91,7 @@ def test_conversation_crud_and_stream_persists_messages_and_metadata():
     assert events[0][1]["user_message_id"]
     assert events[1][1]["text"] == "模型"
     assert events[-2][1]["citations"][0]["citation_id"] == "DOC-1"
+    assert events[-2][1]["retrieval_debug"]["evidence"]["direct_hit_count"] == 1
     assert events[-1][1]["answer"] == "模型回答"
 
     detail = client.get(f"/v1/conversations/{conversation_id}").json()
@@ -120,6 +121,35 @@ def test_low_evidence_stream_returns_recoverable_answer_without_generation():
     events = _events(response)
     assert [name for name, _ in events] == ["message_start", "token", "metadata", "complete"]
     assert events[-2][1]["confidence"] == "low"
+
+
+def test_weak_only_evidence_stream_abstains_without_generation():
+    class FailingGeneration:
+        def stream(self, question, context):
+            raise AssertionError("weak-only evidence must not reach the answer model")
+
+    weak = SearchHit(
+        chunk_id=7,
+        content="A generic body mention.",
+        source="weak.md",
+        title="Weak",
+        score=0.95,
+        matched_channels=["vector"],
+        topic_match="body_only",
+    )
+    client, _ = _client([weak], FailingGeneration())
+    conversation_id = client.post("/v1/conversations", json={}).json()["id"]
+
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/stream",
+        json={"question": "specific question", "allow_web_fallback": False},
+    )
+
+    events = _events(response)
+    metadata = next(payload for name, payload in events if name == "metadata")
+    assert metadata["confidence"] == "low"
+    assert metadata["citations"] == []
+    assert metadata["retrieval_debug"]["evidence"]["caps"]
 
 
 def test_generation_error_marks_user_message_and_emits_safe_error():
