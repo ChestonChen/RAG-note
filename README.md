@@ -2,7 +2,7 @@
 
 这是一个 API-first 的最小 RAG 知识库。它把 `knowledge/` 下的 Markdown/PDF 作为原始资料，解析并切片后写入 PostgreSQL + pgvector，同时保留来源、标题、页码和检索分数。查询时融合向量检索与关键词检索，再把带 `[DOC-n]` 引用的上下文交给可配置的 OpenAI-compatible LLM（默认可对接 DeepSeek）。证据不足时可以选择联网搜索，并把问答、检索调试和评测结果写入数据库。
 
-当前版本包含一个浏览器工作区：左侧管理会话，中间进行流式对话，右侧查看引用和检索命中，另有知识库页面用于上传与入库。MCP、OCR、reranker 和多用户权限仍未加入，重点是让完整的“解析 → 切片 → embedding → 检索 → 引用 → 回答 → 评测”链路可观察、可调用。
+当前版本包含一个浏览器工作区：左侧管理会话，中间进行流式对话，右侧查看引用和检索命中，另有知识库页面用于上传与入库。MCP、OCR 和多用户权限仍未加入；reranker 已作为可选的二次排序器加入且默认关闭。重点是让完整的“解析 → 切片 → embedding → 检索 → 引用 → 回答 → 评测”链路可观察、可调用。
 
 ## 目录
 
@@ -59,7 +59,7 @@ docker-compose.yml      本机 PostgreSQL + pgvector
    Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/qa/ask -ContentType 'application/json' -Body '{"question":"pgvector 是做什么的"}'
    ```
 
-`/v1/retrieval/debug` 会返回每个 chunk 的向量分数、关键词分数、RRF 分数、命中的通道和最终上下文，适合调切片与检索。没有足够证据时 `/v1/qa/ask` 默认尝试联网回退；未配置联网搜索或仍然没有来源时，会返回低证据结果，不调用 LLM。问答结果会写入 `qa_logs`，日志写入失败不会阻断回答。
+`/v1/retrieval/debug` 会返回每个 chunk 的向量分数、关键词分数、RRF 分数、命中的通道和最终上下文，另外会记录确定性的查询规划、各阶段耗时和可选 reranker 状态，适合调切片与检索。PostgreSQL 启用 `pg_trgm` 时会增加 trigram 模糊词法通道；SQLite 或不支持扩展时自动回退到 Python 词法通道。没有足够证据时 `/v1/qa/ask` 默认尝试联网回退；未配置联网搜索或仍然没有来源时，会返回低证据结果，不调用 LLM。问答结果会写入 `qa_logs`，日志写入失败不会阻断回答。
 
 ## 远端 API 配置
 
@@ -139,5 +139,11 @@ Content-Type: application/json
 ```
 
 报告写入 `reports/retrieval_eval.json`，包含 Hit@K、MRR、来源召回、引用覆盖率和未知问题误报率。评估使用确定性的 hashing embedding，仅用于验证解析、入库、检索和引用统计这条 pipeline 的基线；它不代表真实语义模型的检索质量。
+
+检索默认启用本地查询规划（术语边界匹配、意图词和少量相关词扩展），不调用远端模型。CrossEncoder reranker 默认关闭；配置 `RERANKER_ENABLED=true` 后只对融合候选做二次排序，模型不可用时因 `RERANKER_FAIL_OPEN=true` 自动保留原始结果。启用远端或本地 embedding 后需要重新入库，启用或关闭 reranker 不需要重新入库。
+
+查询术语词典位于 `config/term_dictionary.json`，服务启动后按 `TERM_DICTIONARY_PATH`（默认该路径）加载。词典支持 `entities`、`intent_expansions`、`technical_hints`、`generic_terms` 和 `broad_terms`；修改或损坏文件不会阻断服务，解析失败时会回退到内置词典。检索调试信息只返回词典来源类型（`builtin`/`external`）、版本和本次选中的扩展词，不返回词典文件内容。
+
+当问题明确包含 `MySQL`、`Redis`、`vector` 等技术主题时，检索还会执行可解释的主题对齐：若已有标题/章节/来源路径明确命中该主题，则过滤只有正文顺带提及主题、且没有至少两个独立问题锚点的候选。它不会对泛问题启用，也不会删除带有充分技术锚点的跨文档证据；`/v1/retrieval/debug` 的 `topic_filter` 会记录是否启用及过滤数量。
 
 PostgreSQL 只在执行真实入库、向量检索和端到端流程时需要。数据库使用 Docker named volume 持久化，原文文件不会被写入数据库之外的隐式位置。

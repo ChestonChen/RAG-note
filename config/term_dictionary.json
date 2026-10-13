@@ -1,0 +1,19 @@
+{
+  "version": "2026-01",
+  "entities": {
+    "rag": {"aliases": ["RAG", "检索增强生成"], "expansions": ["retrieval augmented generation"]},
+    "pgvector": {"aliases": ["pgvector", "向量数据库", "vector database"], "expansions": ["embedding", "PostgreSQL"]},
+    "mysql": {"aliases": ["MySQL", "SQL"], "expansions": ["关系型数据库", "SELECT", "JOIN"]},
+    "redis": {"aliases": ["Redis", "缓存"], "expansions": ["内存数据库", "持久化"]},
+    "tcp": {"aliases": ["TCP", "传输控制协议"], "expansions": ["可靠传输", "连接"]},
+    "vector": {"aliases": ["vector", "std::vector"], "expansions": ["C++", "动态数组", "迭代器"]}
+  },
+  "generic_terms": ["什么是", "如何", "原理"],
+  "broad_terms": ["数据库", "网络", "编程"],
+  "technical_hints": ["RAG", "pgvector", "MySQL", "Redis", "TCP", "vector"],
+  "intent_expansions": {
+    "definition": ["定义", "概念"],
+    "implementation": ["原理", "机制"],
+    "usage": ["示例", "实践"]
+  }
+}

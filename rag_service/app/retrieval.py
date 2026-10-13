@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import math
 import re
+import time
+from contextvars import ContextVar
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .models import Chunk, Document
+from .query_planning import QueryPlanner
+from .term_dictionary import TermDictionary
+from .reranker import Reranker, create_reranker
 from .schemas import SearchHit
 
 
@@ -80,6 +86,78 @@ def _normalized_text(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _term_occurs(term: str, text: str) -> bool:
+    """Match ASCII identifiers on token boundaries and CJK terms by span."""
+
+    normalized_term = _normalized_text(term)
+    normalized_text = _normalized_text(text)
+    if not normalized_term or not normalized_text:
+        return False
+    if re.search(r"[a-z0-9]", normalized_term):
+        # Avoid substring false positives such as ``set`` in ``dataset`` while
+        # still allowing symbols commonly used by technical identifiers.
+        pattern = rf"(?<![a-z0-9_]){re.escape(normalized_term)}(?![a-z0-9_])"
+        return re.search(pattern, normalized_text, flags=re.IGNORECASE) is not None
+    return normalized_term in normalized_text
+
+
+def _topic_alignment(question: str, plan: Any, document: Document, chunk: Chunk) -> tuple[float, bool, bool, list[str]]:
+    """Score whether a candidate stays on an explicitly named topic.
+
+    This is deliberately metadata-first: a topic in the title, source path, or
+    heading is strong evidence; a topic found only in the body is weak unless
+    another specific query term is present.  The result is used only as a
+    bounded candidate guard when a strong topic candidate exists, so generic
+    queries and documents without planner entities retain the old behavior.
+    """
+
+    entities = list(getattr(plan, "entities", []) or [])
+    if not entities:
+        return 0.0, False, False, []
+    metadata = " ".join(
+        [document.title, document.source_path, " ".join(chunk.heading_path or [])]
+    )
+    body = chunk.content or ""
+    metadata_match = False
+    body_match = False
+    for entity in entities:
+        aliases = [str(getattr(entity, "canonical", "")), str(getattr(entity, "matched_alias", ""))]
+        if any(_term_occurs(alias, metadata) for alias in aliases if alias):
+            metadata_match = True
+        if any(_term_occurs(alias, body) for alias in aliases if alias):
+            body_match = True
+
+    # Anchors are technical terms supplied by the user beyond the broad topic
+    # entity. CJK bigrams are too generic for this purpose, so keep 3+ chars.
+    entity_terms = {
+        str(value).casefold()
+        for entity in entities
+        for value in (getattr(entity, "canonical", ""), getattr(entity, "matched_alias", ""))
+        if value
+    }
+    anchor_terms: list[str] = []
+    for term in _terms(question):
+        key = term.casefold()
+        if key in entity_terms:
+            continue
+        if re.search(r"[a-z0-9]", key) or len(key) >= 3:
+            anchor_terms.append(term)
+    anchors = list(dict.fromkeys(term for term in anchor_terms if _term_occurs(term, metadata + " " + body)))
+    if metadata_match:
+        score = 1.0
+    elif body_match and anchors:
+        score = 0.65
+    elif body_match:
+        score = 0.2
+    elif len(anchors) >= 2:
+        score = 0.45
+    elif anchors:
+        score = 0.25
+    else:
+        score = 0.0
+    return score, metadata_match, body_match, anchors
+
+
 def _core_phrase(question: str) -> str:
     ascii_terms = _ascii_identifiers(question)
     chinese = ""
@@ -105,7 +183,10 @@ def _keyword_details(question: str, document: Document, chunk: Chunk) -> tuple[f
     weighted_hits = 0.0
     total_weight = sum(weight for _, weight in fields)
     for term in terms:
-        term_weight = max((weight for value, weight in fields if term in _normalized_text(value)), default=0.0)
+        term_weight = max(
+            (weight for value, weight in fields if _term_occurs(term, value)),
+            default=0.0,
+        )
         if term_weight:
             weighted_hits += term_weight
             matched.append(term)
@@ -135,7 +216,7 @@ def _keyword_score(question: str, content: str) -> float:
     terms = _terms(question)
     if not query or not haystack or not terms:
         return 0.0
-    score = sum(term in haystack for term in terms) / len(terms)
+    score = sum(_term_occurs(term, haystack) for term in terms) / len(terms)
     return min(1.0, score + (0.25 if query in haystack else 0.0))
 
 
@@ -159,6 +240,12 @@ class _Candidate:
     vector_score: float = 0.0
     keyword_score: float = 0.0
     phrase_score: float = 0.0
+    trigram_score: float = 0.0
+    rerank_score: float | None = None
+    topic_score: float = 0.0
+    topic_metadata_match: bool = False
+    topic_body_match: bool = False
+    topic_anchor_hits: list[str] | None = None
     matched_terms: list[str] | None = None
 
 
@@ -177,17 +264,40 @@ class RetrievalService:
         *,
         settings: Settings | None = None,
         embedding_provider: EmbeddingProvider | None = None,
+        reranker: Reranker | Any | None = None,
+        query_planner: QueryPlanner | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings or get_settings()
         self.embedding_provider = embedding_provider or create_embedding_provider(self.settings)
+        self.reranker = reranker if reranker is not None else create_reranker(self.settings)
+        self.query_planner = query_planner or QueryPlanner(
+            TermDictionary.load(self.settings.resolved_term_dictionary_path())
+        )
         self.latest_debug: dict[str, Any] = {
             "requested_limit": None,
             "primary_count": 0,
-            "channels": {"vector": [], "keyword": [], "phrase": []},
+            "channels": {"vector": [], "keyword": [], "phrase": [], "trigram": []},
             "fusion_order": [],
+            "query_plan": {},
+            "reranker": {"enabled": bool(self.settings.reranker_enabled), "attempted": False, "status": "disabled"},
+            "topic_filter": {"enabled": False, "applied": False, "filtered_count": 0},
+            "timings_ms": {},
         }
         self.last_debug = self.latest_debug
+        self._debug_context: ContextVar[dict[str, Any]] = ContextVar(
+            "rag_retrieval_debug", default=self.latest_debug
+        )
+
+    def get_last_debug(self) -> dict[str, Any]:
+        """Return a request-local copy of the most recent retrieval trace."""
+
+        return deepcopy(self._debug_context.get(self.latest_debug))
+
+    def _debug_state(self) -> dict[str, Any]:
+        """Return the trace owned by the current request context."""
+
+        return self._debug_context.get(self.latest_debug)
 
     def _rows(self, session: Session) -> list[tuple[Chunk, Document]]:
         statement = (
@@ -217,6 +327,7 @@ class RetrievalService:
                 select(Chunk.id, distance.label("distance"))
                 .join(Document, Chunk.document_id == Document.id)
                 .where(Document.status == "ready")
+                .where(distance <= 1.0 - self.settings.retrieval_vector_min_score)
                 .order_by(distance)
                 .limit(self.settings.retrieval_vector_candidates)
             )
@@ -225,35 +336,125 @@ class RetrievalService:
             scores = {int(chunk_id): max(0.0, 1.0 - float(distance_value)) for chunk_id, distance_value in rows}
             return ids, scores
         except Exception:
+            session.rollback()
+            return None
+
+    def _postgres_trigram_scores(
+        self, session: Session, question: str
+    ) -> tuple[list[int], dict[int, float]] | None:
+        """Use pg_trgm as an optional fuzzy lexical channel on PostgreSQL.
+
+        The query uses SQLAlchemy expressions and bound parameters.  SQLite and
+        older databases without the extension simply use the Python lexical
+        channel instead.
+        """
+
+        bind = session.get_bind()
+        if bind is None or bind.dialect.name != "postgresql":
+            return None
+        try:
+            similarity = func.greatest(
+                func.similarity(Chunk.content, question),
+                func.similarity(Document.title, question),
+                func.similarity(Document.source_path, question),
+            )
+            statement = (
+                select(Chunk.id, similarity.label("similarity"))
+                .join(Document, Chunk.document_id == Document.id)
+                .where(Document.status == "ready")
+                .where(similarity >= self.settings.retrieval_trigram_min_similarity)
+                .order_by(similarity.desc())
+                .limit(self.settings.retrieval_trigram_candidates)
+            )
+            rows = list(session.execute(statement).all())
+            ids = [int(chunk_id) for chunk_id, _ in rows]
+            scores = {int(chunk_id): max(0.0, min(1.0, float(score))) for chunk_id, score in rows}
+            return ids, scores
+        except Exception:
+            session.rollback()
             return None
 
     def search(self, question: str, limit: int | None = None) -> list[SearchHit]:
-        normalized = " ".join(question.split())
+        started = time.perf_counter()
+        plan = self.query_planner.plan(question)
+        normalized = plan.normalized_query
         requested_limit = limit or self.settings.retrieval_context_limit
         self.latest_debug = {
             "requested_limit": requested_limit,
             "primary_count": 0,
-            "channels": {"vector": [], "keyword": [], "phrase": []},
+            "channels": {"vector": [], "keyword": [], "phrase": [], "trigram": []},
             "fusion_order": [],
+            "query_plan": plan.to_debug_dict(),
+            "reranker": {
+                "enabled": bool(self.settings.reranker_enabled),
+                "attempted": False,
+                "status": "disabled" if self.reranker is None else "ready",
+            },
+            "topic_filter": {"enabled": bool(plan.entities), "applied": False, "filtered_count": 0},
+            "timings_ms": {},
         }
         self.last_debug = self.latest_debug
+        self._debug_context.set(self.latest_debug)
         if not normalized:
             return []
         limit = requested_limit
-        vector = self.embedding_provider.embed_query(normalized)
+        vector_started = time.perf_counter()
+        vector_query = plan.rewritten_query if self.settings.retrieval_query_expansion_enabled else normalized
+        vector = self.embedding_provider.embed_query(vector_query)
+        self._debug_state()["timings_ms"]["embedding"] = round((time.perf_counter() - vector_started) * 1000, 3)
         with self.session_factory() as session:
+            retrieval_started = time.perf_counter()
             rows = self._rows(session)
             if not rows:
+                self._debug_state()["timings_ms"]["retrieval"] = round((time.perf_counter() - retrieval_started) * 1000, 3)
                 return []
 
             candidates: dict[int, _Candidate] = {}
             postgres_vector = self._postgres_vector_scores(session, vector)
+            postgres_trigram = self._postgres_trigram_scores(session, normalized)
             for chunk, document in rows:
                 candidate = _Candidate(chunk=chunk, document=document)
                 candidate.vector_score = max(0.0, _cosine(vector, chunk.embedding or []))
-                candidate.keyword_score, candidate.matched_terms = _keyword_details(normalized, document, chunk)
+                # Keep lexical matching tied to the words the user supplied.
+                # Planner expansions are useful for semantic embeddings, but
+                # scoring every alias as an exact keyword makes unrelated
+                # documents (for example an SQL note for a MySQL question)
+                # look relevant.
+                lexical_question = normalized
+                candidate.keyword_score, candidate.matched_terms = _keyword_details(
+                    lexical_question, document, chunk
+                )
                 candidate.phrase_score = _phrase_score(normalized, document, chunk)
+                (
+                    candidate.topic_score,
+                    candidate.topic_metadata_match,
+                    candidate.topic_body_match,
+                    candidate.topic_anchor_hits,
+                ) = _topic_alignment(normalized, plan, document, chunk)
                 candidates[chunk.id] = candidate
+
+            # When the query names a concrete topic and at least one candidate
+            # identifies that topic in metadata, discard body-only mentions
+            # unless they also match at least two independent query anchors.
+            # One generic body mention (for example ``JOIN`` in a Redis note)
+            # is not enough evidence to enter a MySQL context, while a section
+            # that matches several specific anchors can still be retained.
+            strong_topic = any(item.topic_metadata_match for item in candidates.values())
+            if strong_topic and plan.entities:
+                filtered_ids = [
+                    chunk_id
+                    for chunk_id, item in candidates.items()
+                    if not item.topic_metadata_match and len(item.topic_anchor_hits or []) < 2
+                ]
+                for chunk_id in filtered_ids:
+                    candidates.pop(chunk_id, None)
+                self._debug_state()["topic_filter"] = {
+                    "enabled": True,
+                    "applied": bool(filtered_ids),
+                    "filtered_count": len(filtered_ids),
+                    "filtered_chunk_ids": filtered_ids[:20],
+                    "reason": "explicit topic metadata outranked body-only mentions",
+                }
 
             if postgres_vector is not None:
                 vector_ids, postgres_scores = postgres_vector
@@ -266,7 +467,12 @@ class RetrievalService:
                     for item in sorted(
                         candidates.values(), key=lambda item: item.vector_score, reverse=True
                     )[: self.settings.retrieval_vector_candidates]
+                    if item.vector_score >= self.settings.retrieval_vector_min_score
                 ]
+            # A concurrent ingestion can commit between the channel query and
+            # the row snapshot. Keep only IDs that have a loaded candidate so
+            # debug serialization and fusion cannot dereference stale rows.
+            vector_ids = [item_id for item_id in vector_ids if item_id in candidates]
             keyword_ids = [
                 item.chunk.id
                 for item in sorted(
@@ -283,14 +489,28 @@ class RetrievalService:
                 )
                 if item.phrase_score > 0
             ][: self.settings.retrieval_phrase_candidates]
-            channels = {"vector": vector_ids, "keyword": keyword_ids, "phrase": phrase_ids}
+            if postgres_trigram is not None:
+                trigram_ids, trigram_scores = postgres_trigram
+                for chunk_id, score in trigram_scores.items():
+                    if chunk_id in candidates:
+                        candidates[chunk_id].trigram_score = score
+            else:
+                trigram_ids = []
+            trigram_ids = [item_id for item_id in trigram_ids if item_id in candidates]
+            channels = {
+                "vector": vector_ids,
+                "keyword": keyword_ids,
+                "phrase": phrase_ids,
+                "trigram": trigram_ids,
+            }
             weights = {
                 "vector": self.settings.retrieval_vector_rrf_weight,
                 "keyword": self.settings.retrieval_keyword_rrf_weight,
                 "phrase": self.settings.retrieval_phrase_rrf_weight,
+                "trigram": self.settings.retrieval_trigram_rrf_weight,
             }
             fused = reciprocal_rank_fusion(channels, weights=weights)
-            self.latest_debug["channels"] = {
+            self._debug_state()["channels"] = {
                 name: [{"chunk_id": item_id, "score": getattr(candidates[item_id], f"{name}_score", 0.0)} for item_id in ids]
                 for name, ids in channels.items()
             }
@@ -315,7 +535,12 @@ class RetrievalService:
                 ),
                 reverse=True,
             )
-            self.latest_debug["fusion_order"] = list(ranked)
+
+            ranked = self._apply_reranker(normalized, ranked, candidates, fused)
+            self._debug_state()["fusion_order"] = list(ranked)
+            self._debug_state()["timings_ms"]["retrieval"] = round(
+                (time.perf_counter() - retrieval_started) * 1000, 3
+            )
             result: list[SearchHit] = []
             per_document: dict[int, int] = defaultdict(int)
             for chunk_id in ranked:
@@ -329,12 +554,16 @@ class RetrievalService:
                 # ``score`` is a bounded display score, not a probability.  It
                 # is useful to compare hits while the raw channel scores remain
                 # visible to the debug endpoint.
-                bounded = min(
-                    1.0,
-                    0.55 * candidate.vector_score
-                    + 0.35 * candidate.keyword_score
-                    + 0.10 * min(1.0, fusion * 10),
+                bounded = (
+                    0.50 * candidate.vector_score
+                    + 0.18 * candidate.keyword_score
+                    + 0.25 * candidate.phrase_score
+                    + 0.07 * candidate.trigram_score
+                    + 0.10 * min(1.0, fusion * 10)
                 )
+                if candidate.rerank_score is not None:
+                    bounded = 0.75 * bounded + 0.25 * candidate.rerank_score
+                bounded = min(1.0, max(0.0, bounded))
                 result.append(
                     SearchHit(
                         chunk_id=chunk_id,
@@ -348,9 +577,23 @@ class RetrievalService:
                         vector_score=candidate.vector_score,
                         keyword_score=candidate.keyword_score,
                         phrase_score=candidate.phrase_score,
+                        trigram_score=candidate.trigram_score,
                         fusion_score=fusion,
                         matched_channels=matched,
                         matched_terms=list(candidate.matched_terms or []),
+                        topic_score=candidate.topic_score,
+                        topic_match=(
+                            "metadata"
+                            if candidate.topic_metadata_match
+                            else "body_with_anchor"
+                            if candidate.topic_body_match and candidate.topic_anchor_hits
+                            else "body_only"
+                            if candidate.topic_body_match
+                            else "anchor_only"
+                            if candidate.topic_anchor_hits
+                            else "none"
+                        ),
+                        rerank_score=candidate.rerank_score,
                     )
                 )
                 if len(result) >= limit:
@@ -358,7 +601,7 @@ class RetrievalService:
 
             for rank, hit in enumerate(result, start=1):
                 hit.rank = rank
-            self.latest_debug["primary_count"] = len(result)
+            self._debug_state()["primary_count"] = len(result)
 
             # Adjacent chunks often contain the definition or example that a
             # top-ranked chunk refers to. Add a small bounded window after
@@ -403,6 +646,8 @@ class RetrievalService:
                                 phrase_score=adjacent.phrase_score,
                                 fusion_score=primary.fusion_score * 0.5,
                                 matched_channels=["neighbor"],
+                                topic_score=adjacent.topic_score,
+                                topic_match="neighbor",
                                 is_neighbor=True,
                             )
                         )
@@ -412,6 +657,75 @@ class RetrievalService:
                     if neighbor_budget <= 0:
                         break
             return result
+
+    def _apply_reranker(
+        self,
+        question: str,
+        ranked: list[int],
+        candidates: dict[int, _Candidate],
+        fused: dict[int, float],
+    ) -> list[int]:
+        """Optionally rerank the fused candidate tail, failing open by default."""
+
+        if self.reranker is None or not ranked:
+            return ranked
+        candidate_ids = ranked[: self.settings.reranker_candidates]
+        documents = [
+            " ".join(
+                [
+                    candidates[item_id].document.title,
+                    " ".join(candidates[item_id].chunk.heading_path or []),
+                    candidates[item_id].chunk.content,
+                ]
+            )
+            for item_id in candidate_ids
+        ]
+        debug = self._debug_state()["reranker"]
+        debug["attempted"] = True
+        debug["candidate_count"] = len(candidate_ids)
+        started = time.perf_counter()
+        try:
+            scores = list(self.reranker.rerank(question, documents))
+            if len(scores) != len(candidate_ids):
+                raise RuntimeError("reranker returned an unexpected number of scores")
+            finite = [float(score) for score in scores if math.isfinite(float(score))]
+            if len(finite) != len(scores) or not finite:
+                raise RuntimeError("reranker returned non-finite scores")
+            low, high = min(finite), max(finite)
+            scale = high - low
+            if scale == 0:
+                debug["status"] = "no_discrimination"
+                debug["scores"] = {}
+                return ranked
+            for item_id, score in zip(candidate_ids, scores):
+                value = float(score)
+                normalized_score = (value - low) / scale
+                candidates[item_id].rerank_score = max(0.0, min(1.0, normalized_score))
+            rerank_scores = {
+                str(item_id): round(float(candidates[item_id].rerank_score or 0.0), 4)
+                for item_id in candidate_ids
+            }
+            debug["status"] = "ok"
+            debug["scores"] = rerank_scores
+            return sorted(
+                ranked,
+                key=lambda item_id: (
+                    fused[item_id]
+                    + self.settings.reranker_weight * (candidates[item_id].rerank_score or 0.0),
+                    fused[item_id],
+                    candidates[item_id].phrase_score,
+                    candidates[item_id].keyword_score,
+                ),
+                reverse=True,
+            )
+        except Exception as exc:
+            debug["status"] = "failed_open" if self.settings.reranker_fail_open else "failed"
+            debug["error"] = str(exc)[:200]
+            if not self.settings.reranker_fail_open:
+                raise
+            return ranked
+        finally:
+            self._debug_state()["timings_ms"]["reranker"] = round((time.perf_counter() - started) * 1000, 3)
 
 
 __all__ = ["RetrievalService", "reciprocal_rank_fusion"]

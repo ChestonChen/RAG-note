@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         default=Path("knowledge"),
         validation_alias="KNOWLEDGE_ROOT",
     )
+    term_dictionary_path: Path = Field(
+        default=Path("config/term_dictionary.json"),
+        validation_alias="TERM_DICTIONARY_PATH",
+    )
 
     embedding_provider: Literal["hashing", "openai_compatible", "sentence_transformers"] = Field(
         default="hashing",
@@ -75,14 +79,35 @@ class Settings(BaseSettings):
     parser_version: str = Field(default="parser-v1", validation_alias="PARSER_VERSION")
 
     retrieval_vector_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_VECTOR_CANDIDATES")
+    retrieval_vector_min_score: float = Field(
+        default=0.12, ge=0, le=1, validation_alias="RETRIEVAL_VECTOR_MIN_SCORE"
+    )
     retrieval_keyword_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_KEYWORD_CANDIDATES")
     retrieval_phrase_candidates: int = Field(default=20, ge=1, validation_alias="RETRIEVAL_PHRASE_CANDIDATES")
+    retrieval_trigram_candidates: int = Field(default=30, ge=1, validation_alias="RETRIEVAL_TRIGRAM_CANDIDATES")
+    retrieval_trigram_min_similarity: float = Field(
+        default=0.1, ge=0, le=1, validation_alias="RETRIEVAL_TRIGRAM_MIN_SIMILARITY"
+    )
     retrieval_vector_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_VECTOR_RRF_WEIGHT")
     retrieval_keyword_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_KEYWORD_RRF_WEIGHT")
     retrieval_phrase_rrf_weight: float = Field(default=1.0, ge=0, validation_alias="RETRIEVAL_PHRASE_RRF_WEIGHT")
+    retrieval_trigram_rrf_weight: float = Field(default=0.5, ge=0, validation_alias="RETRIEVAL_TRIGRAM_RRF_WEIGHT")
     retrieval_context_limit: int = Field(default=8, ge=1, validation_alias="RETRIEVAL_CONTEXT_LIMIT")
     retrieval_neighbor_window: int = Field(default=1, ge=0, validation_alias="RETRIEVAL_NEIGHBOR_WINDOW")
     retrieval_per_document_limit: int = Field(default=3, ge=1, validation_alias="RETRIEVAL_PER_DOCUMENT_LIMIT")
+    retrieval_query_expansion_enabled: bool = Field(
+        default=True, validation_alias="RETRIEVAL_QUERY_EXPANSION_ENABLED"
+    )
+    reranker_enabled: bool = Field(default=False, validation_alias="RERANKER_ENABLED")
+    reranker_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3", validation_alias="RERANKER_MODEL"
+    )
+    reranker_device: str = Field(default="cpu", min_length=1, validation_alias="RERANKER_DEVICE")
+    reranker_batch_size: int = Field(default=4, ge=1, validation_alias="RERANKER_BATCH_SIZE")
+    reranker_candidates: int = Field(default=24, ge=1, validation_alias="RERANKER_CANDIDATES")
+    reranker_max_chars: int = Field(default=1200, ge=128, validation_alias="RERANKER_MAX_CHARS")
+    reranker_weight: float = Field(default=0.35, ge=0, validation_alias="RERANKER_WEIGHT")
+    reranker_fail_open: bool = Field(default=True, validation_alias="RERANKER_FAIL_OPEN")
     low_confidence_threshold: float = Field(default=0.28, ge=0, le=1, validation_alias="LOW_CONFIDENCE_THRESHOLD")
 
     @property
@@ -93,6 +118,11 @@ class Settings(BaseSettings):
         if self.knowledge_root.is_absolute():
             return self.knowledge_root
         return (self.project_root / self.knowledge_root).resolve()
+
+    def resolved_term_dictionary_path(self) -> Path:
+        if self.term_dictionary_path.is_absolute():
+            return self.term_dictionary_path
+        return (self.project_root / self.term_dictionary_path).resolve()
 
     def embedding_signature(self) -> str:
         return f"{self.embedding_provider}:{self.embedding_model}:dim={self.embedding_dimensions}"
