@@ -154,7 +154,8 @@ class EvaluationJudge:
                 raw={"error": str(exc)},
             )
         except Exception as exc:  # Keep an optional evaluator from breaking QA.
-            return JudgeResult(status="error", reason=str(exc), raw={"error": str(exc)})
+            safe_reason = f"provider request failed ({type(exc).__name__})"
+            return JudgeResult(status="error", reason=safe_reason, raw={"error": safe_reason})
 
 
 __all__ = ["EvaluationJudge", "JudgeResult", "JUDGE_SYSTEM_PROMPT", "build_judge_prompt"]

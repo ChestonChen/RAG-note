@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from rag_service.app.config import Settings
 from rag_service.app.context import ContextBuilder
 from rag_service.app.db import get_engine, get_session_factory, init_db
-from rag_service.app.embeddings import HashingEmbeddingProvider
+from rag_service.app.embeddings import create_embedding_provider
 from rag_service.app.ingestion import IngestionService
 from rag_service.app.retrieval import RetrievalService
 from rag_service.app.schemas import SearchHit
@@ -45,6 +45,19 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"case on line {line_number} is missing: {sorted(missing)}")
             if not isinstance(value["relevant_sources"], list):
                 raise ValueError(f"relevant_sources on line {line_number} must be a list")
+            for field in ("tags", "expected_channels"):
+                if field in value and not isinstance(value[field], list):
+                    raise ValueError(f"{field} on line {line_number} must be a list")
+                if field in value and any(not isinstance(item, str) for item in value[field]):
+                    raise ValueError(f"{field} on line {line_number} must contain strings")
+            if (
+                "paraphrase_of" in value
+                and value["paraphrase_of"] is not None
+                and not isinstance(value["paraphrase_of"], str)
+            ):
+                raise ValueError(
+                    f"paraphrase_of on line {line_number} must be a string"
+                )
             cases.append(value)
     return cases
 
@@ -70,6 +83,30 @@ def _ranked_primary(hits: Iterable[SearchHit]) -> list[tuple[int, SearchHit]]:
     return ranked
 
 
+def _embedding_runtime(retrieval_service: Any, settings: Settings) -> dict[str, Any]:
+    provider = getattr(retrieval_service, "embedding_provider", None)
+    if provider is None:
+        return {
+            "provider": settings.embedding_provider,
+            "model": settings.embedding_model,
+            "dimensions": settings.embedding_dimensions,
+            "signature": settings.embedding_signature(),
+        }
+    provider_name = str(getattr(provider, "provider_name", settings.embedding_provider))
+    model = str(
+        getattr(provider, "model", None)
+        or getattr(provider, "model_path", None)
+        or settings.embedding_model
+    )
+    dimensions = getattr(provider, "dimensions", None) or settings.embedding_dimensions
+    return {
+        "provider": provider_name,
+        "model": model,
+        "dimensions": int(dimensions),
+        "signature": f"{provider_name}:{model}:dim={int(dimensions)}",
+    }
+
+
 def evaluate_cases(
     retrieval_service: Any,
     context_builder: ContextBuilder,
@@ -84,6 +121,14 @@ def evaluate_cases(
     case_reports: list[dict[str, Any]] = []
     answerable_reports: list[dict[str, Any]] = []
     unknown_reports: list[dict[str, Any]] = []
+    settings = (
+        getattr(retrieval_service, "settings", None)
+        or getattr(context_builder, "settings", None)
+        or Settings()
+    )
+    embedding_runtime = _embedding_runtime(retrieval_service, settings)
+    channel_hits: dict[str, int] = {}
+    channel_relevant: dict[str, int] = {}
 
     for case in cases:
         question = str(case["question"])
@@ -97,11 +142,35 @@ def evaluate_cases(
             source = _source_key(hit.source)
             if source in relevant:
                 primary_ranks.setdefault(source, rank)
+        for hit in primary:
+            source = _source_key(hit.source)
+            for channel in hit.matched_channels:
+                if channel == "neighbor":
+                    continue
+                channel_hits[channel] = channel_hits.get(channel, 0) + 1
+                if source in relevant:
+                    channel_relevant[channel] = channel_relevant.get(channel, 0) + 1
         relevant_ranks = sorted(primary_ranks.values())
         context = context_builder.build(question, hits)
         cited_sources = {_source_key(citation.source) for citation in context.citations}
         citation_coverage = (
             len(relevant & cited_sources) / len(relevant) if relevant else 0.0
+        )
+        cited_sources = {_source_key(citation.source) for citation in context.citations}
+        citation_precision = (
+            len(relevant & cited_sources) / len(cited_sources) if cited_sources else 0.0
+        )
+        score = float(context.confidence_score)
+        low_threshold = float(
+            getattr(settings, "low_confidence_threshold", confidence_threshold)
+        )
+        high_threshold = 0.65
+        confidence_bucket = (
+            "low"
+            if score < low_threshold
+            else "high"
+            if score >= high_threshold
+            else "medium"
         )
         report = {
             "id": case["id"],
@@ -109,10 +178,16 @@ def evaluate_cases(
             "answerable": bool(case["answerable"]),
             "relevant_sources": list(case.get("relevant_sources", [])),
             "relevant_headings": list(case.get("relevant_headings", [])),
+            "tags": list(case.get("tags", [])),
+            "expected_channels": list(case.get("expected_channels", [])),
+            "paraphrase_of": case.get("paraphrase_of"),
             "primary_hits": [_hit_dict(hit) for hit in primary],
             "neighbor_hits": [_hit_dict(hit) for hit in neighbors],
             "confidence_score": context.confidence_score,
+            "confidence_bucket": confidence_bucket,
             "citation_coverage": citation_coverage,
+            "citation_precision": citation_precision,
+            "unknown_false_positive": (not bool(case["answerable"]) and score >= confidence_threshold),
             "relevant_primary_ranks": relevant_ranks,
             "primary_ranks": primary_ranks,
             "ranks": {
@@ -159,8 +234,24 @@ def evaluate_cases(
         if report["relevant_sources"]
     ]
     false_positives = sum(
-        report["confidence_score"] >= confidence_threshold for report in unknown_reports
+        report["unknown_false_positive"] for report in unknown_reports
     )
+    citation_precision_values = [
+        report["citation_precision"] for report in answerable_reports if report["relevant_sources"]
+    ]
+    all_bucket_counts = {bucket: 0 for bucket in ("low", "medium", "high")}
+    for report in case_reports:
+        all_bucket_counts[report["confidence_bucket"]] += 1
+    channel_contribution = {
+        channel: {
+            "hit_count": count,
+            "relevant_hit_count": channel_relevant.get(channel, 0),
+            "relevant_rate": channel_relevant.get(channel, 0) / count if count else 0.0,
+        }
+        for channel, count in sorted(channel_hits.items())
+    }
+    reranker_debug = getattr(retrieval_service, "get_last_debug", lambda: {})()
+    reranker_state = (reranker_debug or {}).get("reranker", {})
     metrics = {
         "hit_at_1": hit_at(1),
         "hit_at_3": hit_at(3),
@@ -174,14 +265,57 @@ def evaluate_cases(
             false_positives / len(unknown_reports) if unknown_reports else 0.0
         ),
     }
-    return {"metrics": metrics, "cases": case_reports}
+    retrieval_configuration = {
+        "embedding_provider": settings.embedding_provider,
+        "embedding_model": settings.embedding_model,
+        "embedding_dimensions": settings.embedding_dimensions,
+        "retrieval_context_limit": settings.retrieval_context_limit,
+        "retrieval_neighbor_window": settings.retrieval_neighbor_window,
+        "retrieval_per_document_limit": settings.retrieval_per_document_limit,
+        "low_confidence_threshold": low_threshold,
+        "reranker_enabled": bool(settings.reranker_enabled),
+        "reranker_model": settings.reranker_model,
+    }
+    return {
+        "metrics": metrics,
+        "cases": case_reports,
+        "embedding_signature": embedding_runtime["signature"],
+        "embedding_runtime": embedding_runtime,
+        "retrieval_configuration": retrieval_configuration,
+        "retrieval_config": retrieval_configuration,
+        "configured_embedding_signature": settings.embedding_signature(),
+        "confidence_buckets": all_bucket_counts,
+        "citation_source_precision": (
+            sum(citation_precision_values) / len(citation_precision_values)
+            if citation_precision_values
+            else 0.0
+        ),
+        "citation_precision": (
+            sum(citation_precision_values) / len(citation_precision_values)
+            if citation_precision_values
+            else 0.0
+        ),
+        "citation_coverage": (
+            sum(coverage_values) / len(coverage_values) if coverage_values else 0.0
+        ),
+        "per_channel_contribution": channel_contribution,
+        "per_channel_metrics": channel_contribution,
+        "reranker_comparison": {
+            "enabled": bool(settings.reranker_enabled),
+            "attempted": bool(reranker_state.get("attempted", False)),
+            "status": reranker_state.get("status", "disabled"),
+            "available": bool(settings.reranker_enabled and reranker_state),
+            "comparison_run": False,
+            "note": "status metadata only; enable an explicit A/B run to compare rankings",
+        },
+    }
 
 
 def _run(settings: Settings, cases_path: Path, output_path: Path) -> dict[str, Any]:
     engine = init_db(get_engine(settings), settings=settings)
     try:
         factory = get_session_factory(engine=engine)
-        provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+        provider = create_embedding_provider(settings)
         summary = IngestionService(
             settings,
             session_factory=factory,

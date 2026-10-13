@@ -140,6 +140,16 @@ Content-Type: application/json
 
 报告写入 `reports/retrieval_eval.json`，包含 Hit@K、MRR、来源召回、引用覆盖率和未知问题误报率。评估使用确定性的 hashing embedding，仅用于验证解析、入库、检索和引用统计这条 pipeline 的基线；它不代表真实语义模型的检索质量。
 
+评估报告还会记录不含密钥的 `embedding_signature`、检索配置、每个 case 的低/中/高置信度分桶、各检索通道的命中贡献、引用来源 precision，以及未知问题误报明细。若启用了 reranker，报告会附带它是否实际尝试、状态和可用性；答案生成与 AI judge 仍是可选步骤，检索指标与答案 judge 分开统计。
+
+可以先对当前配置的 embedding provider 做一次无索引探针（只输出 provider、模型、维度和安全错误类型）：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/validate_embedding.py
+```
+
+该命令只发送一个样本文本，不会读取或打印 API key，不会修改来源文件或数据库，也不会执行重建。
+
 检索默认启用本地查询规划（术语边界匹配、意图词和少量相关词扩展），不调用远端模型。CrossEncoder reranker 默认关闭；配置 `RERANKER_ENABLED=true` 后只对融合候选做二次排序，模型不可用时因 `RERANKER_FAIL_OPEN=true` 自动保留原始结果。启用远端或本地 embedding 后需要重新入库，启用或关闭 reranker 不需要重新入库。
 
 查询术语词典位于 `config/term_dictionary.json`，服务启动后按 `TERM_DICTIONARY_PATH`（默认该路径）加载。词典支持 `entities`、`intent_expansions`、`technical_hints`、`generic_terms` 和 `broad_terms`；修改或损坏文件不会阻断服务，解析失败时会回退到内置词典。检索调试信息只返回词典来源类型（`builtin`/`external`）、版本和本次选中的扩展词，不返回词典文件内容。
