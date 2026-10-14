@@ -78,14 +78,20 @@ def test_evaluate_cases_calculates_source_metrics_and_unknown_false_positives():
 
     report = evaluate_cases(retrieval, ContextBuilder(), cases, limit=5, confidence_threshold=0.28)
 
-    assert report["metrics"] == {
+    assert {key: report["metrics"][key] for key in (
+        "hit_at_1", "hit_at_3", "hit_at_5", "mrr", "mean_source_recall_at_5",
+        "citation_source_coverage", "unknown_false_positive_rate",
+        "expected_channel_recall", "relevant_heading_recall",
+    )} == {
         "hit_at_1": 0.5,
         "hit_at_3": 1.0,
         "hit_at_5": 1.0,
         "mrr": 0.75,
         "mean_source_recall_at_5": 1.0,
-        "citation_source_coverage": 1.0,
+            "citation_source_coverage": 0.0,
         "unknown_false_positive_rate": 0.0,
+        "expected_channel_recall": 0.0,
+        "relevant_heading_recall": 0.0,
     }
     unknown = next(case for case in report["cases"] if case["id"] == "unknown")
     assert unknown["primary_hits"][0]["source"] == "d.md"
@@ -98,10 +104,36 @@ def test_evaluate_cases_calculates_source_metrics_and_unknown_false_positives():
 def test_load_cases_reads_jsonl_and_skips_blank_lines(tmp_path: Path):
     path = tmp_path / "cases.jsonl"
     path.write_text(
-        '{"id":"one","question":"Q","relevant_sources":["a.md"],"answerable":true}\n\n',
+        '{"id":"one","question":"Q","relevant_sources":["a.md"],"answerable":true,"evidence_groups":[["answer"]]}\n\n',
         encoding="utf-8",
     )
 
     assert load_cases(path) == [
-        {"id": "one", "question": "Q", "relevant_sources": ["a.md"], "answerable": True}
+        {"id": "one", "question": "Q", "relevant_sources": ["a.md"], "answerable": True, "evidence_groups": [["answer"]]}
     ]
+
+
+def test_evaluation_report_records_profile_and_dataset_metadata():
+    cases = [{
+        "id": "profile-case",
+        "question": "profile question",
+        "relevant_sources": ["a.md"],
+        "answerable": True,
+    }]
+    retrieval = FakeRetrievalService({
+        "profile question": [_hit(1, "a.md", 0.8, rank=1)],
+    })
+
+    report = evaluate_cases(
+        retrieval,
+        ContextBuilder(),
+        cases,
+        profile="reference_like",
+        dataset={"name": "gitee-note-repository", "version": "2026-10-14"},
+    )
+
+    assert report["metadata"]["profile"] == "reference_like"
+    assert report["metadata"]["dataset"] == {
+        "name": "gitee-note-repository",
+        "version": "2026-10-14",
+    }

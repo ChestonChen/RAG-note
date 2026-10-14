@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "source_dataset_url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/rag_service/eval_cases.json",
+  "source_dataset_version": "W/\"df7bb6a8777dd041270e2a980846c53ffe350abf",
+  "synced_at": "2026-10-14T06:06:58.966769+00:00",
+  "files": [
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/InterviewQuestion/C++%E9%9D%A2%E8%AF%95%E9%A2%98.pdf",
+      "local_path": "InterviewQuestion/C++面试题.pdf",
+      "size": 2358749,
+      "sha256": "a87ef8db10b7578585fd3a51b6494361e591a39b205d0a78c81e051b77c1f240"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/%E7%B1%BB%E5%92%8C%E5%AF%B9%E8%B1%A1%E5%A4%8D%E4%B9%A0%28%E4%B8%8A%29.pdf",
+      "local_path": "C++/类和对象复习(上).pdf",
+      "size": 233139,
+      "sha256": "ca4af38b642f01d8e4544331b4f3ee411689f03b3b28a22342673af6bbafc714"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/%E7%BB%A7%E6%89%BF%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/继承复习.pdf",
+      "size": 1151964,
+      "sha256": "fc045ccf03890b879ec418f6e8a4ee47c963fe0df4527efdfbc177861950ffec"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/%E5%A4%9A%E6%80%81%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/多态复习.pdf",
+      "size": 1898501,
+      "sha256": "557892b1a04e5d06ccea59bda54f0e86989f200dfc5026b55e5fce2368b3f990"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/内存管理复习.pdf",
+      "size": 1424131,
+      "sha256": "897a5fc35d567294f1184473264c0092a106e9839bc22defe52b61c8fde813a7"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/vector%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/vector复习.pdf",
+      "size": 510927,
+      "sha256": "d6ed5a43468141b7bc511564ae17760dfaddb6c6fd3f86f3eaee9e67b74d8908"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/map%E4%B8%8Eset%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/map与set复习.pdf",
+      "size": 283582,
+      "sha256": "90bc4ebc1876c09e05b813338486468d62a3a3ec7e927688b94e5f4a9ea04e1b"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/%E6%A8%A1%E7%89%88%E8%BF%9B%E9%98%B6%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/模版进阶复习.pdf",
+      "size": 597277,
+      "sha256": "d3a198a7bd373f1efe947ad4e71127f0184fdb24a6bbd901c6f7c2ec764987eb"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/%E4%BC%A0%E8%BE%93%E5%B1%82%E5%8D%8F%E8%AE%AETCP.pdf",
+      "local_path": "Linux/传输层协议TCP.pdf",
+      "size": 10485760,
+      "sha256": "a7b7d6ad011ddbbd6b1f1a72a00635042ae32196b10faf785071d81b87a5cca6"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/InterviewQuestion/%E8%AE%A1%E7%BD%91%E9%9D%A2%E8%AF%95%E9%A2%98.pdf",
+      "local_path": "InterviewQuestion/计网面试题.pdf",
+      "size": 5731116,
+      "sha256": "c42d18cc00b873cb6af7de3b3cf674885fcdf6fd2acebedb2c24cf70cdb85993"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/%E4%BC%A0%E8%BE%93%E5%B1%82%E5%8D%8F%E8%AE%AEUDP.pdf",
+      "local_path": "Linux/传输层协议UDP.pdf",
+      "size": 3536972,
+      "sha256": "e43db0785c2129af12ef647f51febe67ecc79110bf2ecded213a7702a7a71a24"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/Linux%E4%B8%AD%E7%9A%84%E5%A4%9A%E8%B7%AF%E8%BD%AC%E6%8E%A5.pdf",
+      "local_path": "Linux/Linux中的多路转接.pdf",
+      "size": 732440,
+      "sha256": "161cc6b6c6ebd4da057a07976c1c57268558ac31b99608f83bd2be33f399a2ed"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/%E4%BA%94%E7%A7%8DIO%E6%A8%A1%E5%9E%8B%E4%B8%8E%E2%BE%AE%E9%98%BB%E5%A1%9EIO.pdf",
+      "local_path": "Linux/五种IO模型与⾮阻塞IO.pdf",
+      "size": 1147066,
+      "sha256": "78d79d8c69e6160a2152fad0aa7f0f741b640fffde33f12a4df4b69b8324946c"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/%E8%BF%9B%E7%A8%8B%E9%97%B4%E9%80%9A%E4%BF%A1.pdf",
+      "local_path": "Linux/进程间通信.pdf",
+      "size": 10485760,
+      "sha256": "2bf1f40b87f484fc84e067fbd5c0073bf869ed803c096dff68b01945187f1713"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/%E7%BA%BF%E7%A8%8B%E5%90%8C%E6%AD%A5%E4%B8%8E%E4%BA%92%E6%96%A5.pdf",
+      "local_path": "Linux/线程同步与互斥.pdf",
+      "size": 10485760,
+      "sha256": "5aba5778390c9c6fde92a31750cd48126def8f14612ddeec7c011cef5439317a"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/DNS%E4%B8%8EICMP.pdf",
+      "local_path": "Linux/DNS与ICMP.pdf",
+      "size": 7755947,
+      "sha256": "065e9450ba41b5b92b634b0235788640c6aceea1257d4aab52aec1fa653730d4"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/HTTPS%20%E5%8D%8F%E8%AE%AE%E5%8E%9F%E7%90%86.pdf",
+      "local_path": "Linux/HTTPS 协议原理.pdf",
+      "size": 10485760,
+      "sha256": "05b14bfdd41a4953a8eedfe4ecee303083e99128bde750ea683735fb298bc0b2"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_primary/Redis%20-%20%E5%8D%95%E7%BA%BF%E7%A8%8B%E4%B8%BA%E4%BB%80%E4%B9%88%E8%BF%99%E4%B9%88%E5%BF%AB%EF%BC%9F.pdf",
+      "local_path": "Redis_primary/Redis - 单线程为什么这么快？.pdf",
+      "size": 701606,
+      "sha256": "627a2b098d15031550fcff73ea60036a10926724b1b72a3df0b9122d663bef42"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_primary/Redis%20ZSet%EF%BC%88%E6%9C%89%E5%BA%8F%E9%9B%86%E5%90%88%EF%BC%89%E5%85%A8%E9%9D%A2%E8%A7%A3%E6%9E%90.pdf",
+      "local_path": "Redis_primary/Redis ZSet（有序集合）全面解析.pdf",
+      "size": 1580003,
+      "sha256": "50f0fba09b1fa3a28bc2418a1d5b7bcf3923958d676aee8fb696aaef839df6c1"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_advanced/Redis%20%E6%8C%81%E4%B9%85%E5%8C%96%E6%9C%BA%E5%88%B6%E6%B7%B1%E5%BA%A6%E8%A7%A3%E6%9E%90%EF%BC%88RDB%20_%20AOF%EF%BC%89.pdf",
+      "local_path": "Redis_advanced/Redis 持久化机制深度解析（RDB _ AOF）.pdf",
+      "size": 2084587,
+      "sha256": "1db3937510517e5181b226162342bd508af64439dd3879ac70f0c37160758eab"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_advanced/Redis%20%E5%88%86%E5%B8%83%E5%BC%8F%E9%94%81%E8%BF%9B%E9%98%B6%EF%BC%9A%E4%BB%8E%E7%9C%8B%E9%97%A8%E7%8B%97%E5%88%B0%20Redlock%20%E7%9A%84%E9%AB%98%E5%8F%AF%E7%94%A8%E5%AE%9E%E8%B7%B5.pdf",
+      "local_path": "Redis_advanced/Redis 分布式锁进阶：从看门狗到 Redlock 的高可用实践.pdf",
+      "size": 652055,
+      "sha256": "c90fcbdd1bff0d3bbc902335b659d0de69d2c3596b077b77b119b275f333bb65"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_advanced/Redis%20%E4%B8%BB%E4%BB%8E%E5%A4%8D%E5%88%B6%E4%B8%8E%E9%AB%98%E5%8F%AF%E7%94%A8%E6%9E%B6%E6%9E%84%EF%BC%9A%E4%BB%8E%E5%8E%9F%E7%90%86%E5%88%B0%E7%94%9F%E4%BA%A7%E5%AE%9E%E8%B7%B5.pdf",
+      "local_path": "Redis_advanced/Redis 主从复制与高可用架构：从原理到生产实践.pdf",
+      "size": 1782033,
+      "sha256": "feb52757c26f4c4ae288e0a753ce3a6641d5967f81eba078bc6e517aeded96d3"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_advanced/Redis%20Sentinel%20%E9%AB%98%E5%8F%AF%E7%94%A8%E6%9E%B6%E6%9E%84%EF%BC%9A%E4%BB%8E%E5%8E%9F%E7%90%86%E5%88%B0%20Docker%20%E9%83%A8%E7%BD%B2%E5%85%A8%E8%A7%A3%E6%9E%90.pdf",
+      "local_path": "Redis_advanced/Redis Sentinel 高可用架构：从原理到 Docker 部署全解析.pdf",
+      "size": 1011776,
+      "sha256": "883cb58cb5e02298bc7c6098dd5bf774aa2011c099528ccfe1c159d2fa6e978f"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/MySQL/MySQL%20%E5%88%9D%E5%A7%8B%E4%BD%BF%E7%94%A8%E6%8C%87%E5%8D%97%EF%BC%88%E4%BB%8E%E9%9B%B6%E5%88%B0%E5%AE%9E%E6%88%98%EF%BD%9C%E6%8C%87%E4%BB%A4%E5%85%A8%E8%A6%86%E7%9B%96%E7%89%88%EF%BC%89.pdf",
+      "local_path": "MySQL/MySQL 初始使用指南（从零到实战｜指令全覆盖版）.pdf",
+      "size": 755028,
+      "sha256": "bebf5267ecbae3c7bf914b588a4172aa7947f5c532e94afb9111dec026482c56"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/MySQL/%E5%9F%BA%E4%BA%8EChatGPT%E7%9A%84%E9%9B%B6%E5%9F%BA%E7%A1%80%E5%A4%8D%E4%B9%A0MySQL.pdf",
+      "local_path": "MySQL/基于ChatGPT的零基础复习MySQL.pdf",
+      "size": 1606451,
+      "sha256": "1433fa1b8121b76f9ff88806018104cbd1c043657697ed4efa43c31162c9fcf9"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Project/C++%20-%20%E9%AB%98%E6%80%A7%E8%83%BD%E5%86%85%E5%AD%98%E6%B1%A0.pdf",
+      "local_path": "Project/C++ - 高性能内存池.pdf",
+      "size": 2510646,
+      "sha256": "93261c67b3a8fa6af80368f063efe3826237c01ae0cb13b28985a9acc6209fad"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/BSTree%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/BSTree复习.pdf",
+      "size": 1085961,
+      "sha256": "a0c2d4dbac9fe7e59e6e72ea572a8bbbf331257d6d64a50d52f416390c5e8a87"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/C++/list%E5%A4%8D%E4%B9%A0.pdf",
+      "local_path": "C++/list复习.pdf",
+      "size": 731086,
+      "sha256": "36d10b862ad57d1ddaed63ef7f8d731c5f9f7c05f481e28673b041196633d353"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/Ext%E7%B3%BB%E5%88%97%E6%96%87%E4%BB%B6%E7%B3%BB%E7%BB%9F.pdf",
+      "local_path": "Linux/Ext系列文件系统.pdf",
+      "size": 10485760,
+      "sha256": "986b44c962f21f11ebdcda69c4707e5293ff4a62ca853f6aa56b67d2cabc5fcd"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/NAT%E3%80%81%E4%BB%A3%E7%90%86%E6%9C%8D%E5%8A%A1%E3%80%81%E5%86%85%E7%BD%91%E7%A9%BF%E9%80%8F.pdf",
+      "local_path": "Linux/NAT、代理服务、内网穿透.pdf",
+      "size": 4077050,
+      "sha256": "38198b0c7f48c1c0a7a2c9d18e7ad1aa96a62c1692e7745edf58f57df90da2f5"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Linux/Linux%E8%BF%9B%E7%A8%8B%E4%BF%A1%E5%8F%B7%28%E4%B8%8A%29.pdf",
+      "local_path": "Linux/Linux进程信号(上).pdf",
+      "size": 3779883,
+      "sha256": "4b6b9e74574a3a912e31030310dccd4bfbc035747ba006b6d8588dd9e6aac109"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/MySQL/%E5%8A%9B%E6%89%A3%E9%AB%98%E9%A2%91%20SQL%2050%20%E9%A2%98%E9%98%B6%E6%AE%B5%E6%80%BB%E7%BB%93%EF%BC%88%E4%B8%80%EF%BC%89.pdf",
+      "local_path": "MySQL/力扣高频 SQL 50 题阶段总结（一）.pdf",
+      "size": 520471,
+      "sha256": "7bcb092470386e0131532fc88d4407b3f15b591f9a333458ab31fabd18e13944"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Project/%E5%88%86%E5%B8%83%E5%BC%8F%E4%BB%BB%E5%8A%A1%E8%B0%83%E5%BA%A6%E4%B8%8E%E6%B6%88%E6%81%AF%E6%B4%BE%E5%8F%91%E7%B3%BB%E7%BB%9F.pdf",
+      "local_path": "Project/分布式任务调度与消息派发系统.pdf",
+      "size": 3336375,
+      "sha256": "5e42528408a773e35abb6911fd11c95b720d9a24ae39d4b5276c82671ba84611"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_advanced/Redis%20Cluster%20%E8%BF%9B%E9%98%B6%E5%AE%9E%E6%88%98%EF%BC%9A%E6%95%85%E9%9A%9C%E8%BD%AC%E7%A7%BB%E3%80%81%E6%89%A9%E5%AE%B9%E7%BC%A9%E5%AE%B9%E4%B8%8E%E7%94%9F%E4%BA%A7%E8%BF%90%E7%BB%B4%E5%85%A8%E8%A7%A3%E6%9E%90.pdf",
+      "local_path": "Redis_advanced/Redis Cluster 进阶实战：故障转移、扩容缩容与生产运维全解析.pdf",
+      "size": 3349594,
+      "sha256": "273e43d5d33b45e2c786da1e16fa58252b3d016ac073241d379d9fcc5c197cfe"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_advanced/%E6%B7%B1%E5%85%A5%E7%90%86%E8%A7%A3%20Redis%20%E4%BA%8B%E5%8A%A1%EF%BC%9A%E4%BB%8E%E5%8E%9F%E7%90%86%E5%88%B0%E5%AE%9E%E8%B7%B5%E7%9A%84%E5%AE%8C%E6%95%B4%E8%A7%A3%E6%9E%90.pdf",
+      "local_path": "Redis_advanced/深入理解 Redis 事务：从原理到实践的完整解析.pdf",
+      "size": 1312073,
+      "sha256": "d951d6ad47769cc3d27f371bf9f42076e95423bd1c50af8ecbf349845db086d7"
+    },
+    {
+      "url": "https://gitee.com/yegelute/note-repository/raw/master/NoteRepository/core/pdf/Redis_primary/Redis%20%E9%AB%98%E7%BA%A7%E6%95%B0%E6%8D%AE%E7%B1%BB%E5%9E%8B%E8%AF%A6%E8%A7%A3%EF%BC%9AStream%E3%80%81Geospatial%E3%80%81HyperLogLog%E3%80%81Bitmaps%E3%80%81Bitfields.pdf",
+      "local_path": "Redis_primary/Redis 高级数据类型详解：Stream、Geospatial、HyperLogLog、Bitmaps、Bitfields.pdf",
+      "size": 409121,
+      "sha256": "4e918b91347cf1fd42fce7bb253c4a78211d322f02a7c5b5be53e98fe57e08a1"
+    }
+  ]
+}
