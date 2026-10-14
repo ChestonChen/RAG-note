@@ -164,6 +164,48 @@ class IngestionFailure(TimestampMixin, Base):
     job: Mapped[IngestionJob] = relationship(back_populates="failures")
 
 
+class EvalRun(TimestampMixin, Base):
+    """Persistent metadata and aggregate metrics for one evaluation run."""
+
+    __tablename__ = "eval_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True, nullable=False)
+    active_key: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
+    total_cases: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_cases: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_cases: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dataset: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    results: Mapped[list["EvalResult"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="EvalResult.case_index"
+    )
+
+
+class EvalResult(TimestampMixin, Base):
+    """One redacted case result belonging to an evaluation run."""
+
+    __tablename__ = "eval_results"
+    __table_args__ = (Index("ix_eval_results_run_case", "run_id", "case_id", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("eval_runs.id", ondelete="CASCADE"), nullable=False)
+    case_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    case_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="completed", nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    run: Mapped[EvalRun] = relationship(back_populates="results")
+
+
 class QALog(TimestampMixin, Base):
     """Optional audit record for a generated answer."""
 
@@ -246,6 +288,8 @@ __all__ = [
     "configure_embedding_dimensions",
     "IngestionJob",
     "IngestionFailure",
+    "EvalRun",
+    "EvalResult",
     "Conversation",
     "Message",
     "QALog",

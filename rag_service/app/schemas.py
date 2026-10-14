@@ -168,6 +168,41 @@ class EvalRunRequest(BaseModel):
     limit: int = Field(default=5, ge=1, le=30)
     generate_answers: bool = False
     judge_with_ai: bool = False
+    run_async: bool = False
+
+
+class EvalRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    total_cases: int
+    completed_cases: int
+    failed_cases: int
+    progress: float
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    profile: str | None = None
+    dataset: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class EvalResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    run_id: int
+    case_index: int
+    case_id: str
+    status: str
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class HealthResponse(BaseModel):

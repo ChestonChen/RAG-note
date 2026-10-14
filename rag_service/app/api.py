@@ -20,10 +20,11 @@ from .config import Settings, get_settings
 from .context import ContextBuilder, ContextPackage
 from .db import get_engine, get_session_factory
 from .evaluation import EvaluationJudge
+from .evaluation_runner import EvaluationRunner
 from .generation import ChatGenerationService
 from .ingestion import IngestionService
 from .job_runner import ConflictError, IngestionJobRunner
-from .models import Chunk, Conversation, Document, Message, QALog
+from .models import Chunk, Conversation, Document, EvalResult, EvalRun, Message, QALog
 from .retrieval import RetrievalService
 from .schemas import (
     AskRequest,
@@ -46,6 +47,8 @@ from .schemas import (
     IngestionFailureResponse,
     IngestionJobCreateRequest,
     IngestionJobResponse,
+    EvalResultResponse,
+    EvalRunResponse,
 )
 from .web_search import WebSearchService
 
@@ -122,6 +125,7 @@ def create_app(
     session_factory: Any | None = None,
     evaluation_judge: EvaluationJudge | Any | None = None,
     ingestion_job_runner: IngestionJobRunner | Any | None = None,
+    evaluation_runner: EvaluationRunner | Any | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     context_builder = ContextBuilder(settings)
@@ -140,10 +144,21 @@ def create_app(
         web_search_service = WebSearchService(settings)
     if evaluation_judge is None:
         evaluation_judge = EvaluationJudge(settings)
+    if evaluation_runner is None:
+        evaluation_runner = EvaluationRunner(
+            session_factory,
+            retrieval_service,
+            context_builder,
+            settings=settings,
+            evaluation_judge=evaluation_judge,
+            answer_generator=lambda question, context: generation_service.generate(question, context),
+        )
 
     app = FastAPI(title="RAG Knowledge Base MVP", version="0.1.0")
     app.router.on_startup.append(ingestion_job_runner.start)
     app.router.on_shutdown.append(ingestion_job_runner.shutdown)
+    app.router.on_startup.append(evaluation_runner.start)
+    app.router.on_shutdown.append(evaluation_runner.shutdown)
     router = APIRouter()
 
     def _admin_guard(api_key: str | None) -> None:
@@ -856,48 +871,80 @@ def create_app(
     ) -> dict[str, Any]:
         _admin_guard(x_admin_api_key)
         try:
-            from scripts.evaluate_retrieval import evaluate_cases, load_cases
-
-            cases_path = Path(request.cases_path or "eval/retrieval_cases.jsonl")
-            if not cases_path.is_absolute():
-                cases_path = (settings.project_root / cases_path).resolve()
-            cases = load_cases(cases_path)
-            report = evaluate_cases(
-                retrieval_service,
-                context_builder,
-                cases,
-                limit=request.limit,
-                confidence_threshold=settings.low_confidence_threshold,
-            )
+            run = evaluation_runner.create(request, run_async=request.run_async)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=f"evaluation cases not found: {exc}") from exc
+            raise HTTPException(status_code=404, detail="evaluation cases not found") from exc
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"evaluation failed: {exc}") from exc
-
-        if request.generate_answers or request.judge_with_ai:
-            answer_reports: list[dict[str, Any]] = []
-            for case in cases:
-                question = str(case["question"])
-                hits = retrieval_service.search(question, request.limit)
-                context = context_builder.build(question, hits)
-                answer = (
-                    generation_service.generate(question, context)
-                    if request.generate_answers or request.judge_with_ai
-                    else ""
-                )
-                item: dict[str, Any] = {"id": case["id"], "question": question, "answer": answer}
-                if request.judge_with_ai:
-                    judged = evaluation_judge.evaluate(question, answer, context.text)
-                    item["judge"] = {
-                        "status": judged.status,
-                        "passed": judged.passed,
-                        "score": judged.score,
-                        "reason": judged.reason,
-                        "raw": judged.raw,
+            if request.generate_answers or request.judge_with_ai:
+                detail = "LLM generation failed (RuntimeError)" if request.generate_answers else f"evaluation failed ({type(exc).__name__})"
+                raise HTTPException(status_code=502, detail=detail) from exc
+            raise HTTPException(status_code=500, detail=f"evaluation failed ({type(exc).__name__})") from exc
+        if not request.run_async and run.failed_cases:
+            detail = "LLM generation failed (RuntimeError)" if request.generate_answers else "evaluation failed (case error)"
+            raise HTTPException(status_code=502, detail=detail)
+        payload = EvalRunResponse.model_validate(run).model_dump(mode="json")
+        if not request.run_async:
+            rows = evaluation_runner.results(run.id)
+            payload["cases"] = [item.result for item in rows]
+            payload["metadata"] = {
+                "profile": run.profile,
+                "dataset": run.dataset,
+                "config": run.config,
+            }
+            if request.generate_answers or request.judge_with_ai:
+                payload["answers"] = [
+                    {
+                        "id": item.case_id,
+                        "answer": item.result.get("answer", ""),
+                        **({"judge": item.result["judge"]} if "judge" in item.result else {}),
                     }
-                answer_reports.append(item)
-            report["answers"] = answer_reports
-        return report
+                    for item in rows
+                    if item.status == "completed"
+                ]
+        return payload
+
+    @router.get("/v1/admin/eval/runs", response_model=dict[str, Any])
+    def list_eval_runs(
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        _admin_guard(x_admin_api_key)
+        items = [EvalRunResponse.model_validate(run) for run in evaluation_runner.list(limit)]
+        return {"items": items, "count": len(items)}
+
+    @router.get("/v1/admin/eval/runs/latest", response_model=EvalRunResponse)
+    def latest_eval_run(
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> EvalRunResponse:
+        _admin_guard(x_admin_api_key)
+        try:
+            return EvalRunResponse.model_validate(evaluation_runner.latest())
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="evaluation run not found") from exc
+
+    @router.get("/v1/admin/eval/runs/{run_id}", response_model=EvalRunResponse)
+    def get_eval_run(
+        run_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> EvalRunResponse:
+        _admin_guard(x_admin_api_key)
+        try:
+            return EvalRunResponse.model_validate(evaluation_runner.get(run_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="evaluation run not found") from exc
+
+    @router.get("/v1/admin/eval/runs/{run_id}/results", response_model=list[EvalResultResponse])
+    def get_eval_results(
+        run_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> list[EvalResultResponse]:
+        _admin_guard(x_admin_api_key)
+        try:
+            return [EvalResultResponse.model_validate(item) for item in evaluation_runner.results(run_id)]
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="evaluation run not found") from exc
 
     app.include_router(router)
     return app

@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import unicodedata
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -198,6 +199,10 @@ def _safe_metadata_mapping(value: Any) -> dict[str, Any]:
         if any(marker in field.casefold() for marker in _SECRET_FIELD_MARKERS):
             continue
         if isinstance(item, (str, int, float, bool)) or item is None:
+            if isinstance(item, str) and (field.casefold().endswith("url") or field.casefold() == "url"):
+                parsed = urlsplit(item)
+                query = [(key, val) for key, val in parse_qsl(parsed.query) if key.casefold() not in _SECRET_FIELD_MARKERS and not any(marker in key.casefold() for marker in _SECRET_FIELD_MARKERS)]
+                item = urlunsplit((parsed.scheme, parsed.hostname or "", parsed.path, urlencode(query), ""))
             safe[field] = item
         elif isinstance(item, dict):
             safe[field] = _safe_metadata_mapping(item)
@@ -522,6 +527,8 @@ def evaluate_cases(
         "metadata": {
             "profile": profile,
             "profile_description": _EVALUATION_PROFILES.get(profile, {}).get("description"),
+            "profile_applied": False,
+            "profile_semantics": "descriptive_label_only",
             "dataset": _safe_metadata_mapping(dataset),
             "settings_overrides": _safe_metadata_mapping(settings_overrides),
         },

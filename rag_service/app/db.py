@@ -16,7 +16,16 @@ from sqlalchemy import Engine, create_engine, inspect, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
-from .models import Base, Chunk, Document, IngestionJob, configure_embedding_dimensions
+from .models import (
+    Base,
+    Chunk,
+    Document,
+    EvalResult,
+    EvalRun,
+    IngestionFailure,
+    IngestionJob,
+    configure_embedding_dimensions,
+)
 from .search_text import build_search_text
 
 
@@ -114,6 +123,7 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     Base.metadata.create_all(engine)
     _ensure_ingestion_job_columns(engine)
+    _ensure_eval_columns(engine)
     _ensure_search_text_column(engine)
     _backfill_search_text(engine)
     if engine.dialect.name == "postgresql":
@@ -185,6 +195,11 @@ def _ensure_ingestion_job_columns(engine: Engine) -> None:
         for name, definition in definitions.items():
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE ingestion_jobs ADD COLUMN {name} {definition}"))
+        # Older SQLite databases may contain the long synchronous terminal
+        # marker. Normalize it before the bounded job status contract is used.
+        connection.execute(
+            text("UPDATE ingestion_jobs SET status = 'failed' WHERE status = 'completed_with_errors'")
+        )
         if engine.dialect.name == "sqlite":
             connection.execute(
                 text("CREATE UNIQUE INDEX IF NOT EXISTS ix_ingestion_jobs_active_key ON ingestion_jobs(active_key)")
@@ -193,6 +208,51 @@ def _ensure_ingestion_job_columns(engine: Engine) -> None:
             connection.execute(
                 text("CREATE UNIQUE INDEX IF NOT EXISTS ix_ingestion_jobs_active_key ON ingestion_jobs(active_key)")
             )
+
+
+def _ensure_eval_columns(engine: Engine) -> None:
+    """Backfill columns for evaluation tables created by an earlier build."""
+
+    if not isinstance(engine, Engine):
+        return
+    if engine.dialect.name not in {"sqlite", "postgresql"}:
+        return
+    inspector = inspect(engine)
+    if inspector.has_table("eval_runs"):
+        columns = {column["name"] for column in inspector.get_columns("eval_runs")}
+        definitions = {
+            "active_key": "INTEGER NULL",
+            "total_cases": "INTEGER NOT NULL DEFAULT 0",
+            "completed_cases": "INTEGER NOT NULL DEFAULT 0",
+            "failed_cases": "INTEGER NOT NULL DEFAULT 0",
+            "progress": "FLOAT NOT NULL DEFAULT 0",
+            "started_at": "TIMESTAMP WITH TIME ZONE NULL",
+            "finished_at": "TIMESTAMP WITH TIME ZONE NULL",
+            "error_message": "TEXT NULL",
+            "metrics": "JSON NOT NULL DEFAULT '{}'",
+            "config": "JSON NOT NULL DEFAULT '{}'",
+            "profile": "VARCHAR(64) NULL",
+            "dataset": "JSON NOT NULL DEFAULT '{}'",
+        }
+        with engine.begin() as connection:
+            for name, definition in definitions.items():
+                if name not in columns:
+                    connection.execute(text(f"ALTER TABLE eval_runs ADD COLUMN {name} {definition}"))
+            connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_eval_runs_active_key ON eval_runs(active_key)"))
+    if inspector.has_table("eval_results"):
+        columns = {column["name"] for column in inspector.get_columns("eval_results")}
+        definitions = {
+            "case_index": "INTEGER NOT NULL DEFAULT 0",
+            "case_id": "VARCHAR(256) NOT NULL DEFAULT ''",
+            "status": "VARCHAR(16) NOT NULL DEFAULT 'completed'",
+            "result": "JSON NOT NULL DEFAULT '{}'",
+            "error_message": "TEXT NULL",
+        }
+        with engine.begin() as connection:
+            for name, definition in definitions.items():
+                if name not in columns:
+                    connection.execute(text(f"ALTER TABLE eval_results ADD COLUMN {name} {definition}"))
+            connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_eval_results_run_case ON eval_results(run_id, case_id)"))
 
 
 def _ensure_search_text_column(engine: Engine) -> None:
@@ -257,7 +317,12 @@ def dispose_cached_engines() -> None:
 def drop_derived_tables(engine: Engine) -> list[str]:
     """Drop only rebuildable index tables while preserving source files."""
 
-    derived_tables = (Chunk.__table__, Document.__table__, IngestionJob.__table__)
+    derived_tables = (
+        Chunk.__table__,
+        IngestionFailure.__table__,
+        Document.__table__,
+        IngestionJob.__table__,
+    )
     removed: list[str] = []
     if engine.dialect.name == "postgresql":
         with engine.begin() as connection:
