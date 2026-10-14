@@ -46,7 +46,7 @@ export function listConversations(): Promise<ConversationSummary[]> {
   return request<ConversationSummary[]>("/v1/conversations");
 }
 
-export function createConversation(title = "New conversation"): Promise<Conversation> {
+export function createConversation(title = "新建会话"): Promise<Conversation> {
   return request<Conversation>("/v1/conversations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -71,6 +71,10 @@ export function updateConversation(
 
 export function deleteConversation(id: number): Promise<void> {
   return request<void>(`/v1/conversations/${id}`, { method: "DELETE" });
+}
+
+export function deleteDocument(id: number): Promise<void> {
+  return request<void>(`/v1/knowledge/documents/${id}`, { method: "DELETE" });
 }
 
 export function createSseParser(

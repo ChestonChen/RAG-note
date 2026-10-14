@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createSseParser, formatApiError } from "./api";
+import { createSseParser, deleteDocument, formatApiError } from "./api";
+import { vi } from "vitest";
 
 describe("createSseParser", () => {
   it("parses events split across arbitrary chunk boundaries", () => {
@@ -49,5 +50,22 @@ describe("formatApiError", () => {
     ['{"message":"temporarily unavailable"}', "temporarily unavailable"],
   ])("surfaces %s response bodies", (body, expected) => {
     expect(formatApiError(422, "Unprocessable Entity", body).message).toBe(expected);
+  });
+});
+
+describe("deleteDocument", () => {
+  it("deletes a knowledge document with the DELETE method", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 204,
+      statusText: "No Content",
+      text: async () => "",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteDocument(42);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/knowledge/documents/42", { method: "DELETE" });
+    vi.unstubAllGlobals();
   });
 });
