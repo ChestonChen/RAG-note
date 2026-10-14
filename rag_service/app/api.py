@@ -268,6 +268,16 @@ def create_app(
             raise HTTPException(status_code=404, detail="document file not found")
         return candidate
 
+    def _safe_source_path(document: Document) -> Path:
+        root = settings.resolved_knowledge_root().resolve()
+        lexical = root / document.source_path
+        resolved = lexical.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="document file not found") from exc
+        return lexical
+
     @router.get("/v1/conversations", response_model=list[ConversationSummary])
     def list_conversations() -> list[ConversationSummary]:
         with session_factory() as session:
@@ -658,6 +668,31 @@ def create_app(
                 filename=source.name,
                 content_disposition_type="inline",
             )
+
+    @router.delete("/v1/knowledge/documents/{document_id}", status_code=204)
+    def delete_knowledge_document(
+        document_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> Response:
+        _configured_admin_guard(x_admin_api_key)
+        with session_factory() as session:
+            document = session.get(Document, document_id)
+            if document is None:
+                raise HTTPException(status_code=404, detail="document not found")
+            source = _safe_source_path(document)
+            try:
+                source.unlink(missing_ok=True)
+            except OSError as exc:
+                session.rollback()
+                raise HTTPException(status_code=500, detail="failed to delete document file") from exc
+            session.execute(delete(Chunk).where(Chunk.document_id == document_id))
+            session.delete(document)
+            try:
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                raise HTTPException(status_code=500, detail="failed to delete document record") from exc
+        return Response(status_code=204)
 
     @router.post("/v1/retrieval/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:
