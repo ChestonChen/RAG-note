@@ -113,6 +113,7 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     Base.metadata.create_all(engine)
+    _ensure_ingestion_job_columns(engine)
     _ensure_search_text_column(engine)
     _backfill_search_text(engine)
     if engine.dialect.name == "postgresql":
@@ -159,6 +160,39 @@ def init_db(engine: Engine | None = None, settings: Settings | None = None) -> E
                 )
             )
     return engine
+
+
+def _ensure_ingestion_job_columns(engine: Engine) -> None:
+    """Add async job fields to databases created by earlier versions."""
+
+    if not isinstance(engine, Engine):
+        return
+    if engine.dialect.name not in {"sqlite", "postgresql"}:
+        return
+    inspector = inspect(engine)
+    if not inspector.has_table("ingestion_jobs"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("ingestion_jobs")}
+    definitions = {
+        "force": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "active_key": "INTEGER NULL",
+        "started_at": "TIMESTAMP WITH TIME ZONE NULL",
+        "finished_at": "TIMESTAMP WITH TIME ZONE NULL",
+        "current_stage": "VARCHAR(32) NULL",
+        "current_file": "VARCHAR(2048) NULL",
+    }
+    with engine.begin() as connection:
+        for name, definition in definitions.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE ingestion_jobs ADD COLUMN {name} {definition}"))
+        if engine.dialect.name == "sqlite":
+            connection.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS ix_ingestion_jobs_active_key ON ingestion_jobs(active_key)")
+            )
+        else:
+            connection.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS ix_ingestion_jobs_active_key ON ingestion_jobs(active_key)")
+            )
 
 
 def _ensure_search_text_column(engine: Engine) -> None:

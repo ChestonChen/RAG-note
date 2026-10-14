@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -289,7 +290,13 @@ class IngestionService:
             document.file_mtime = path.stat().st_mtime
         session.commit()
 
-    def scan(self, force: bool = False) -> IngestionSummary:
+    def scan(
+        self,
+        force: bool = False,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        job_id: int | None = None,
+    ) -> IngestionSummary:
         """Scan the configured root and return per-run counters.
 
         Every source file is committed independently.  A malformed PDF or a
@@ -310,22 +317,39 @@ class IngestionService:
         current_paths = {self._source_path(path, root) for path in paths}
         session = self.session_factory()
         try:
-            job = IngestionJob(status="running", scanned_files=summary.scanned_files)
-            session.add(job)
-            session.commit()
-            summary.job_id = job.id
+            if job_id is None:
+                job = IngestionJob(status="running", scanned_files=summary.scanned_files, force=force)
+                session.add(job)
+                session.commit()
+                summary.job_id = job.id
+            else:
+                job = session.get(IngestionJob, job_id)
+                if job is None:
+                    raise ValueError("ingestion job not found")
+                job.status = "running"
+                job.scanned_files = summary.scanned_files
+                job.current_stage = "scanning"
+                session.commit()
+                summary.job_id = job_id
+
+            if progress_callback:
+                progress_callback({"stage": "scanning", "current_file": None, "summary": summary})
 
             parser_signature = self.settings.parser_version
             chunking_signature = self.settings.chunking_signature()
             embedding_signature = self.settings.embedding_signature()
             for path in paths:
                 source_path = self._source_path(path, root)
+                if progress_callback:
+                    progress_callback({"stage": "processing", "current_file": source_path, "summary": summary})
                 digest = sha256_file(path)
                 existing = self._get_document(session, source_path)
                 if not force and not should_reindex(
                     existing, digest, parser_signature, chunking_signature, embedding_signature
                 ):
                     summary.skipped_files += 1
+                    if progress_callback:
+                        progress_callback({"stage": "skipped", "current_file": source_path, "summary": summary})
                     continue
                 try:
                     parsed = self._parse(path)
@@ -372,10 +396,16 @@ class IngestionService:
                     session.commit()
                     summary.processed_files += 1
                     summary.chunk_count += chunk_count
+                    if progress_callback:
+                        progress_callback({"stage": "processed", "current_file": source_path, "summary": summary})
                 except Exception as error:  # isolate one bad source
                     logger.exception("failed to ingest %s", path)
                     self._mark_failed(session, path=path, root=root, digest=digest, error=error)
                     summary.failed_files += 1
+                    if progress_callback:
+                        progress_callback(
+                            {"stage": "failed", "current_file": source_path, "error": error, "summary": summary}
+                        )
 
             # Delete only sources that disappeared while the root itself exists
             # (an existing but empty directory is a valid signal that all
@@ -394,6 +424,9 @@ class IngestionService:
             job.failed_files = summary.failed_files
             job.deleted_documents = summary.deleted_documents
             job.chunk_count = summary.chunk_count
+            job.current_file = None
+            job.current_stage = "completed"
+            job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return summary
         except Exception:

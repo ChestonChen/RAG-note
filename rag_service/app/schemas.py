@@ -64,6 +64,43 @@ class IngestRequest(BaseModel):
     force: bool = False
 
 
+class IngestionJobCreateRequest(BaseModel):
+    force: bool = False
+    run_async: bool = True
+
+
+class IngestionJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    force: bool
+    scanned_files: int
+    processed_files: int
+    skipped_files: int
+    failed_files: int
+    deleted_documents: int
+    chunk_count: int
+    current_stage: str | None = None
+    current_file: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class IngestionFailureResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    job_id: int
+    source_path: str
+    error_type: str
+    error_message: str
+    created_at: datetime
+
+
 class IngestResponse(BaseModel):
     scanned_files: int
     processed_files: int

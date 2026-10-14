@@ -124,12 +124,18 @@ class Chunk(Base):
 
 
 class IngestionJob(TimestampMixin, Base):
-    """Counters and status for one synchronous ingestion run."""
+    """Persistent status and progress for one ingestion run."""
 
     __tablename__ = "ingestion_jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     status: Mapped[str] = mapped_column(String(16), default="running", index=True, nullable=False)
+    force: Mapped[bool] = mapped_column(default=False, nullable=False)
+    active_key: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    current_file: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     scanned_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     skipped_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -137,6 +143,25 @@ class IngestionJob(TimestampMixin, Base):
     deleted_documents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    failures: Mapped[list["IngestionFailure"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", order_by="IngestionFailure.id"
+    )
+
+
+class IngestionFailure(TimestampMixin, Base):
+    """A redacted failure associated with one ingestion job and source file."""
+
+    __tablename__ = "ingestion_failures"
+    __table_args__ = (Index("ix_ingestion_failures_job_id", "job_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("ingestion_jobs.id", ondelete="CASCADE"), nullable=False)
+    source_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    error_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, nullable=False)
+
+    job: Mapped[IngestionJob] = relationship(back_populates="failures")
 
 
 class QALog(TimestampMixin, Base):
@@ -220,6 +245,7 @@ __all__ = [
     "EmbeddingType",
     "configure_embedding_dimensions",
     "IngestionJob",
+    "IngestionFailure",
     "Conversation",
     "Message",
     "QALog",

@@ -22,6 +22,7 @@ from .db import get_engine, get_session_factory
 from .evaluation import EvaluationJudge
 from .generation import ChatGenerationService
 from .ingestion import IngestionService
+from .job_runner import ConflictError, IngestionJobRunner
 from .models import Chunk, Conversation, Document, Message, QALog
 from .retrieval import RetrievalService
 from .schemas import (
@@ -42,6 +43,9 @@ from .schemas import (
     MessageResponse,
     KnowledgeDocumentResponse,
     KnowledgeUploadResponse,
+    IngestionFailureResponse,
+    IngestionJobCreateRequest,
+    IngestionJobResponse,
 )
 from .web_search import WebSearchService
 
@@ -117,6 +121,7 @@ def create_app(
     web_search_service: WebSearchService | Any | None = None,
     session_factory: Any | None = None,
     evaluation_judge: EvaluationJudge | Any | None = None,
+    ingestion_job_runner: IngestionJobRunner | Any | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     context_builder = ContextBuilder(settings)
@@ -127,6 +132,8 @@ def create_app(
         retrieval_service = RetrievalService(session_factory, settings=settings)
     if ingestion_service is None:
         ingestion_service = IngestionService(settings=settings, session_factory=session_factory)
+    if ingestion_job_runner is None:
+        ingestion_job_runner = IngestionJobRunner(session_factory, ingestion_service)
     if generation_service is None:
         generation_service = ChatGenerationService(settings)
     if web_search_service is None:
@@ -135,6 +142,8 @@ def create_app(
         evaluation_judge = EvaluationJudge(settings)
 
     app = FastAPI(title="RAG Knowledge Base MVP", version="0.1.0")
+    app.router.on_startup.append(ingestion_job_runner.start)
+    app.router.on_shutdown.append(ingestion_job_runner.shutdown)
     router = APIRouter()
 
     def _admin_guard(api_key: str | None) -> None:
@@ -747,6 +756,54 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
         return _ingest_response(summary)
+
+    @router.post("/v1/admin/ingest/jobs", response_model=IngestionJobResponse)
+    def create_ingestion_job(
+        request: IngestionJobCreateRequest,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> IngestionJobResponse:
+        _admin_guard(x_admin_api_key)
+        try:
+            job = ingestion_job_runner.create(force=request.force, run_async=request.run_async)
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return IngestionJobResponse.model_validate(job)
+
+    @router.get("/v1/admin/ingest/jobs", response_model=dict[str, Any])
+    def list_ingestion_jobs(
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        _admin_guard(x_admin_api_key)
+        items = [IngestionJobResponse.model_validate(job) for job in ingestion_job_runner.list(limit)]
+        return {"items": items, "count": len(items)}
+
+    @router.get("/v1/admin/ingest/jobs/{job_id}", response_model=IngestionJobResponse)
+    def get_ingestion_job(
+        job_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> IngestionJobResponse:
+        _admin_guard(x_admin_api_key)
+        try:
+            job = ingestion_job_runner.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="ingestion job not found") from exc
+        return IngestionJobResponse.model_validate(job)
+
+    @router.get(
+        "/v1/admin/ingest/jobs/{job_id}/failures",
+        response_model=list[IngestionFailureResponse],
+    )
+    def get_ingestion_job_failures(
+        job_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> list[IngestionFailureResponse]:
+        _admin_guard(x_admin_api_key)
+        try:
+            failures = ingestion_job_runner.get_failures(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="ingestion job not found") from exc
+        return [IngestionFailureResponse.model_validate(failure) for failure in failures]
 
     @router.get("/v1/admin/qa-logs")
     def admin_qa_logs(
