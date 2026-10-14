@@ -277,3 +277,112 @@ def test_knowledge_routes_use_configured_admin_guard(tmp_path):
         files={"file": ("guide.md", b"safe", "text/markdown")},
     ).status_code == 401
     assert client.get("/v1/knowledge/documents/1/file").status_code == 401
+
+
+def test_delete_knowledge_document_removes_source_document_and_chunks(tmp_path):
+    settings, factory, app = _app(tmp_path)
+    root = settings.resolved_knowledge_root()
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "guide.md"
+    source.write_text("safe", encoding="utf-8")
+    with factory() as session:
+        document = Document(
+            source_path="guide.md",
+            source_type="markdown",
+            title="Guide",
+            file_hash="a" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature="hashing:model:dim=384",
+            status="ready",
+        )
+        session.add(document)
+        session.flush()
+        session.add(
+            Chunk(
+                document_id=document.id,
+                chunk_index=0,
+                content="one",
+                heading_path=[],
+                token_count=1,
+                embedding=[0.0] * 384,
+            )
+        )
+        document_id = document.id
+        session.commit()
+
+    client = TestClient(app)
+    response = client.delete(f"/v1/knowledge/documents/{document_id}")
+
+    assert response.status_code == 204
+    assert not source.exists()
+    with factory() as session:
+        assert session.get(Document, document_id) is None
+        assert session.query(Chunk).filter_by(document_id=document_id).count() == 0
+    assert client.get("/v1/knowledge/documents").json() == []
+
+
+def test_delete_knowledge_document_cleans_stale_record_when_source_is_missing(tmp_path):
+    _, factory, app = _app(tmp_path)
+    with factory() as session:
+        document = Document(
+            source_path="missing.md",
+            source_type="markdown",
+            title="Missing",
+            file_hash="b" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature="hashing:model:dim=384",
+            status="ready",
+        )
+        session.add(document)
+        session.commit()
+        document_id = document.id
+
+    response = TestClient(app).delete(f"/v1/knowledge/documents/{document_id}")
+
+    assert response.status_code == 204
+    with factory() as session:
+        assert session.get(Document, document_id) is None
+
+
+def test_delete_unknown_document_returns_404(tmp_path):
+    _, _, app = _app(tmp_path)
+
+    assert TestClient(app).delete("/v1/knowledge/documents/999").status_code == 404
+
+
+def test_delete_rejects_source_path_outside_knowledge_root(tmp_path):
+    settings, factory, app = _app(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("must remain", encoding="utf-8")
+    with factory() as session:
+        document = Document(
+            source_path="../outside.md",
+            source_type="markdown",
+            title="Outside",
+            file_hash="c" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature="hashing:model:dim=384",
+            status="ready",
+        )
+        session.add(document)
+        session.commit()
+        document_id = document.id
+
+    response = TestClient(app).delete(f"/v1/knowledge/documents/{document_id}")
+
+    assert response.status_code == 404
+    assert outside.read_text(encoding="utf-8") == "must remain"
+    with factory() as session:
+        assert session.get(Document, document_id) is not None
+
+
+def test_delete_knowledge_document_uses_configured_admin_guard(tmp_path):
+    settings = _settings(tmp_path, admin_api_key="secret")
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    app = create_app(settings, session_factory=factory)
+
+    assert TestClient(app).delete("/v1/knowledge/documents/1").status_code == 401
