@@ -11,7 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_URL = (
@@ -34,7 +34,38 @@ def _safe_relative_path(value: object) -> str | None:
     parts = PurePosixPath(normalized).parts
     if any(part in {"", ".", ".."} for part in parts) or ".." in parts:
         return None
+    if not parts[-1].casefold().endswith(".pdf"):
+        return None
     return "/".join(parts)
+
+
+_SECRET_QUERY_MARKERS = ("key", "secret", "token", "auth", "password", "credential", "signature")
+
+
+def _sanitize_public_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return value
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host
+        try:
+            if parsed.port is not None:
+                netloc += f":{parsed.port}"
+        except ValueError:
+            return None
+        query = [
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if not any(marker in key.casefold() for marker in _SECRET_QUERY_MARKERS)
+        ]
+        return urlunsplit((parsed.scheme, netloc, parsed.path, urlencode(query), ""))
+    except ValueError:
+        return None
 
 
 def sync_cases_to_downloads(cases: Iterable[dict[str, Any]], source_url: str) -> list[str]:
@@ -70,6 +101,76 @@ def _response_content(response: Any) -> bytes:
     raise ValueError("response did not contain bytes")
 
 
+def _looks_like_complete_pdf(payload: bytes) -> bool:
+    """Recognize the cheap PDF markers needed to detect truncated raw files."""
+
+    if not payload.startswith(b"%PDF"):
+        return False
+    # The EOF marker is normally in the final 1 KiB, but a slightly wider
+    # window tolerates small trailing metadata while keeping this inexpensive.
+    return b"%%EOF" in payload[-4096:]
+
+
+def _contents_payload(client: Any, fallback_url: str) -> tuple[bytes, int | None, str | None] | None:
+    """Decode a Gitee contents response and retain integrity metadata."""
+
+    try:
+        fallback = _client_get(client, fallback_url)
+        fallback.raise_for_status()
+        payload = json.loads(_response_content(fallback).decode("utf-8"))
+        encoded = payload.get("content") if isinstance(payload, dict) else None
+        if isinstance(encoded, str):
+            size = payload.get("size")
+            try:
+                size = int(size) if size is not None else None
+            except (TypeError, ValueError):
+                size = None
+            sha = payload.get("sha") if isinstance(payload.get("sha"), str) else None
+            return base64.b64decode(encoded, validate=False), size, sha
+    except Exception:
+        return None
+    return None
+
+
+def _gitee_blob_url(root: str, sha: str | None) -> str | None:
+    parsed = urlsplit(root)
+    parts = parsed.path.strip("/").split("/")
+    if parsed.hostname != "gitee.com" or len(parts) < 5 or parts[2] != "raw" or not sha:
+        return None
+    owner, repo = parts[0], parts[1]
+    return f"https://gitee.com/api/v5/repos/{quote(owner)}/{quote(repo)}/git/blobs/{quote(sha)}"
+
+
+def _fallback_payload(
+    client: Any,
+    fallback_url: str | None,
+    root: str,
+    *,
+    expect_pdf: bool = False,
+) -> bytes | None:
+    if not fallback_url:
+        return None
+    decoded = _contents_payload(client, fallback_url)
+    if decoded is None:
+        return None
+    payload, declared_size, sha = decoded
+    if (
+        (declared_size is not None and len(payload) != declared_size)
+        or (expect_pdf and not _looks_like_complete_pdf(payload))
+    ):
+        blob_url = _gitee_blob_url(root, sha)
+        if blob_url:
+            blob = _contents_payload(client, blob_url)
+            if blob is not None:
+                payload, blob_size, _ = blob
+                if blob_size is not None and len(payload) != blob_size:
+                    return None
+                declared_size = blob_size or declared_size
+    if declared_size is not None and len(payload) != declared_size:
+        return None
+    return payload
+
+
 def _client_get(client: Any, url: str) -> Any:
     try:
         return client.get(url, timeout=60, follow_redirects=True)
@@ -79,30 +180,40 @@ def _client_get(client: Any, url: str) -> Any:
         return client.get(url, timeout=60)
 
 
-def _request(client: Any, url: str, *, fallback_url: str | None = None) -> bytes:
+def _request(
+    client: Any,
+    url: str,
+    *,
+    fallback_url: str | None = None,
+    expect_pdf: bool = False,
+) -> bytes:
     try:
         response = _client_get(client, url)
         raise_for_status = getattr(response, "raise_for_status", None)
         if callable(raise_for_status):
             raise_for_status()
-        return _response_content(response)
+        raw_payload = _response_content(response)
     except Exception as exc:
         # Gitee serves some large public LFS files with a login-only raw URL.
         # Its public contents endpoint exposes the same file as base64; use it
         # only for the already allow-listed path and never pass credentials.
         if fallback_url:
-            try:
-                fallback = _client_get(client, fallback_url)
-                fallback.raise_for_status()
-                payload = json.loads(_response_content(fallback).decode("utf-8"))
-                encoded = payload.get("content") if isinstance(payload, dict) else None
-                if isinstance(encoded, str):
-                    return base64.b64decode(encoded, validate=False)
-            except Exception:
-                pass
+            replacement = _fallback_payload(client, fallback_url, url, expect_pdf=expect_pdf)
+            if replacement is not None and (not expect_pdf or _looks_like_complete_pdf(replacement)):
+                return replacement
         # Never include response text, URLs with query strings, headers, or
         # exception messages because those may contain credentials.
         raise RuntimeError(f"benchmark request failed ({type(exc).__name__})") from None
+    if not expect_pdf or not fallback_url or _looks_like_complete_pdf(raw_payload):
+        return raw_payload
+    replacement = _fallback_payload(client, fallback_url, url, expect_pdf=expect_pdf)
+    if replacement is not None and _looks_like_complete_pdf(replacement):
+        return replacement
+    # A non-Gitee test double may use arbitrary bytes for a PDF. Preserve
+    # that compatibility; real Gitee URLs always have a contents fallback.
+    if urlsplit(fallback_url).hostname != "gitee.com":
+        return raw_payload
+    raise RuntimeError("downloaded PDF failed integrity check")
 
 
 def _join_url(root: str, relative_path: str) -> str:
@@ -216,11 +327,12 @@ def sync_gitee_benchmark(
             client,
             _join_url(pdf_root, relative_path),
             fallback_url=_gitee_contents_url(pdf_root, relative_path),
+            expect_pdf=relative_path.casefold().endswith(".pdf"),
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(payload)
         files.append({
-            "url": _join_url(pdf_root, relative_path),
+            "url": _sanitize_public_url(_join_url(pdf_root, relative_path)),
             "local_path": relative_path,
             "size": len(payload),
             "sha256": hashlib.sha256(payload).hexdigest(),
@@ -234,7 +346,7 @@ def sync_gitee_benchmark(
 
     manifest = {
         "schema_version": 1,
-        "source_dataset_url": source_url,
+        "source_dataset_url": _sanitize_public_url(source_url),
         "source_dataset_version": _dataset_version(source_response, source_payload),
         "synced_at": datetime.now(timezone.utc).isoformat(),
         "files": files,
