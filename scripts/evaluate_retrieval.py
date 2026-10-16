@@ -113,7 +113,7 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
 
 def _source_key(source: str) -> str:
     value = str(source).replace("\\", "/").lstrip("./")
-    for prefix in ("eval/fixtures/", "fixtures/"):
+    for prefix in ("eval/fixtures/", "fixtures/", "gitee-benchmark/"):
         if value.startswith(prefix):
             value = value[len(prefix) :]
     return value

@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .db import drop_derived_tables, get_engine, get_session_factory, init_db
-from .embeddings import EmbeddingProvider, create_embedding_provider
+from .embeddings import (
+    EmbeddingProvider,
+    create_embedding_provider,
+    embedding_provider_signature,
+    embedding_values_are_finite,
+)
 from .ingestion import IngestionService
 
 
@@ -80,9 +85,12 @@ def validate_embedding_provider(
                 error = "provider returned an invalid vector"
             else:
                 observed = len(vector)
-                ok = observed == expected_dimensions
-                if not ok:
+                if observed != expected_dimensions:
                     error = "observed vector dimension does not match configured dimension"
+                elif not embedding_values_are_finite(vector):
+                    error = "provider returned non-numeric or non-finite vector values"
+                else:
+                    ok = True
     except Exception as exc:  # pragma: no cover - provider errors vary
         error = f"{exc.__class__.__name__} while probing embedding provider"
     return EmbeddingValidationReport(
@@ -164,7 +172,7 @@ def rebuild_derived_index(
     result: dict[str, Any] = {
         "status": "validation_failed" if not validation.ok else "pending",
         "source_root": source_root,
-        "embedding_signature": settings.embedding_signature(),
+        "embedding_signature": embedding_provider_signature(provider, settings),
         "active_embedding_signature": None,
         "validation": validation.to_dict(),
         "dropped_tables": [],
@@ -194,7 +202,7 @@ def rebuild_derived_index(
     scan_complete = source_root_path.is_dir() and processed + skipped + failed == scanned
     if scan_complete and failed == 0:
         result["status"] = "completed"
-        result["active_embedding_signature"] = settings.embedding_signature()
+        result["active_embedding_signature"] = embedding_provider_signature(provider, settings)
         result["recoverability"] = None
     else:
         result["status"] = "completed_with_errors" if failed else "incomplete"

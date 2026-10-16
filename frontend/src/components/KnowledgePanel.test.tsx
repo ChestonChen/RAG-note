@@ -64,7 +64,8 @@ describe("KnowledgePanel delete action", () => {
 
   it("disables the delete button while the document is pending", () => {
     const { container, root } = renderPanel({ deletingDocumentId: 7 });
-    expect((container.querySelector('[aria-label="删除 Guide"]') as HTMLButtonElement).disabled).toBe(true);
+    const button = container.querySelector('[aria-label="正在删除 Guide"]') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
     act(() => root.unmount());
   });
 

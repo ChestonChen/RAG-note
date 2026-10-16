@@ -11,7 +11,7 @@ from rag_service.app.config import Settings
 from rag_service.app.db import get_engine, get_session_factory, init_db
 from rag_service.app.ingestion import IngestionService
 from rag_service.app.job_runner import ConflictError, IngestionJobRunner
-from rag_service.app.models import IngestionFailure, IngestionJob
+from rag_service.app.models import Document, IngestionFailure, IngestionJob
 
 
 class FakeEmbeddingProvider:
@@ -104,6 +104,16 @@ def test_file_failure_is_redacted_and_does_not_stop_later_files(tmp_path):
     assert "provider.example" not in failures[0].error_message
     with factory() as session:
         assert session.query(IngestionFailure).count() == 1
+        document_error = (
+            session.query(Document)
+            .filter_by(source_path="bad.md")
+            .one()
+            .error_message
+            or ""
+        )
+    assert "do-not-store" not in document_error
+    assert "provider.example" not in document_error
+    assert "ValueError" in document_error
     runner.shutdown()
 
 
@@ -162,3 +172,94 @@ def test_admin_ingestion_job_routes_are_protected_and_queryable(tmp_path):
         f"/v1/admin/ingest/jobs/{job_id}/failures",
         headers={"X-Admin-API-Key": "test-admin"},
     ).json() == []
+
+
+def test_admin_ingestion_job_routes_are_available_without_local_admin_key(tmp_path):
+    root, settings, factory, service, runner = _runner(tmp_path)
+    (root / "note.md").write_text("source", encoding="utf-8")
+    settings.admin_api_key = None
+    client = TestClient(
+        create_app(
+            settings=settings,
+            ingestion_service=service,
+            session_factory=factory,
+            ingestion_job_runner=runner,
+        )
+    )
+
+    response = client.post(
+        "/v1/admin/ingest/jobs",
+        json={"force": False, "run_async": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    runner.shutdown()
+
+
+def test_admin_ingestion_job_routes_reject_wrong_key_when_configured(tmp_path):
+    root, settings, factory, service, runner = _runner(tmp_path)
+    (root / "note.md").write_text("source", encoding="utf-8")
+    client = TestClient(
+        create_app(
+            settings=settings,
+            ingestion_service=service,
+            session_factory=factory,
+            ingestion_job_runner=runner,
+        )
+    )
+
+    response = client.post(
+        "/v1/admin/ingest/jobs",
+        headers={"X-Admin-API-Key": "wrong"},
+        json={"force": False, "run_async": False},
+    )
+
+    assert response.status_code == 401
+    runner.shutdown()
+
+
+def test_submission_after_shutdown_does_not_leave_active_job(tmp_path):
+    _, _, factory, _, runner = _runner(tmp_path)
+    runner.shutdown()
+
+    with pytest.raises(RuntimeError):
+        runner.create(force=False, run_async=True)
+
+    with factory() as session:
+        job = session.query(IngestionJob).one()
+        assert job.status == "failed"
+        assert job.active_key is None
+
+
+def test_drop_derived_tables_includes_ingestion_failures(tmp_path):
+    from rag_service.app.db import drop_derived_tables, get_engine, init_db
+
+    settings = Settings(
+        knowledge_root=tmp_path / "knowledge",
+        database_url="sqlite+pysqlite:///:memory:",
+        embedding_provider="hashing",
+        embedding_dimensions=384,
+    )
+    engine = init_db(get_engine(settings))
+
+    assert "ingestion_failures" in drop_derived_tables(engine)
+
+
+def test_init_db_normalizes_legacy_overlong_ingestion_status(tmp_path):
+    settings = Settings(
+        knowledge_root=tmp_path / "knowledge",
+        database_url="sqlite+pysqlite:///:memory:",
+        embedding_provider="hashing",
+        embedding_dimensions=384,
+    )
+    engine = init_db(get_engine(settings))
+    factory = get_session_factory(engine=engine)
+    with factory() as session:
+        session.add(IngestionJob(status="completed_with_errors"))
+        session.commit()
+
+    init_db(engine, settings=settings)
+
+    with factory() as session:
+        assert session.query(IngestionJob).one().status == "failed"

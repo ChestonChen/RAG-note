@@ -47,6 +47,23 @@ def test_validate_embedding_provider_records_mismatch_as_not_ok():
     assert report.observed_dimension == 2
 
 
+@pytest.mark.parametrize(
+    "vector",
+    [["not-a-number"] * 8, ["1.0"] * 8, [float("nan")] * 8, [10**10000] * 8],
+)
+def test_validate_embedding_provider_rejects_non_numeric_or_non_finite_values(vector):
+    from rag_service.app.reindex import validate_embedding_provider
+
+    report = validate_embedding_provider(
+        FakeEmbeddingProvider([vector]),
+        expected_dimensions=8,
+    )
+
+    assert report.ok is False
+    assert report.observed_dimension == 8
+    assert report.error == "provider returned non-numeric or non-finite vector values"
+
+
 def test_rebuild_derived_index_requires_confirmation_before_postgres_changes(monkeypatch):
     from rag_service.app.config import Settings
     from rag_service.app import reindex
@@ -73,7 +90,14 @@ def test_rebuild_summary_is_serializable_and_preserves_source_root(tmp_path, mon
     root = tmp_path / "knowledge"
     root.mkdir()
     (root / "note.md").write_text("source", encoding="utf-8")
-    settings = Settings(knowledge_root=root, database_url="sqlite+pysqlite:///:memory:")
+    settings = Settings(
+        knowledge_root=root,
+        database_url="sqlite+pysqlite:///:memory:",
+        embedding_model="BAAI/bge-m3",
+        embedding_dimensions=8,
+    )
+    provider = FakeEmbeddingProvider([[1.0] + [0.0] * 7])
+    monkeypatch.setattr(reindex, "create_embedding_provider", lambda _settings: provider)
     fake_summary = SimpleNamespace(
         scanned_files=1,
         processed_files=1,
@@ -90,7 +114,7 @@ def test_rebuild_summary_is_serializable_and_preserves_source_root(tmp_path, mon
     assert result["status"] == "completed"
     assert result["source_root"] == str(root.resolve())
     assert result["ingestion"]["processed_files"] == 1
-    assert result["active_embedding_signature"] == settings.embedding_signature()
+    assert result["active_embedding_signature"] == "fake:fake-model:dim=8"
     assert (root / "note.md").read_text(encoding="utf-8") == "source"
 
 

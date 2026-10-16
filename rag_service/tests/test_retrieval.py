@@ -569,6 +569,64 @@ def test_retrieval_filters_body_only_cross_topic_distractors_when_topic_is_expli
     assert service.get_last_debug()["topic_filter"]["filtered_count"] == 1
 
 
+def test_retrieval_keeps_up_to_five_answer_bearing_chunks_per_document():
+    settings = Settings(
+        database_url="sqlite+pysqlite:///:memory:",
+        retrieval_vector_candidates=10,
+        retrieval_keyword_candidates=10,
+        retrieval_phrase_candidates=10,
+        retrieval_full_text_candidates=10,
+        retrieval_exact_candidates=10,
+        retrieval_context_limit=5,
+        retrieval_neighbor_window=0,
+    )
+    engine = init_db(get_engine(settings), settings=settings)
+    factory = get_session_factory(engine=engine)
+    provider = HashingEmbeddingProvider(settings.embedding_dimensions)
+    contents = [
+        "Redis persistence overview and RDB snapshot basics.",
+        "AOF persistence appends each write operation.",
+        "The appendfsync always policy flushes every command.",
+        "The appendfsync everysec policy flushes once per second.",
+        "AOF rewrite removes redundant operations using current state.",
+    ]
+    with factory() as session:
+        document = Document(
+            source_path="redis.pdf",
+            source_type="pdf",
+            title="Redis Persistence",
+            file_hash="5" * 64,
+            parser_signature="parser-v1",
+            chunking_signature="chunk-v1",
+            embedding_signature=settings.embedding_signature(),
+            status="ready",
+        )
+        session.add(document)
+        session.flush()
+        session.add_all(
+            [
+                Chunk(
+                    document_id=document.id,
+                    chunk_index=index,
+                    content=content,
+                    heading_path=["Redis", "Persistence"],
+                    token_count=len(content.split()),
+                    embedding=provider.embed_query(content),
+                )
+                for index, content in enumerate(contents)
+            ]
+        )
+        session.commit()
+
+    hits = RetrievalService(factory, settings=settings, embedding_provider=provider).search(
+        "What does appendfsync everysec mean, and why does Redis use AOF rewrite?",
+        limit=5,
+    )
+
+    assert len([hit for hit in hits if not hit.is_neighbor]) == 5
+    assert any("AOF rewrite" in hit.content for hit in hits)
+
+
 def test_lexical_identifier_matching_does_not_treat_dataset_as_set():
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",
@@ -774,7 +832,7 @@ def test_exact_and_phrase_evidence_improve_bounded_confidence():
 def test_context_citations_exclude_neighbor_and_weak_hits_but_keep_strong_hit():
     strong = SearchHit(
         chunk_id=104,
-        content="The heading directly answers the question.",
+        content="The topic directly answers the question.",
         source="knowledge/strong.md",
         title="Strong",
         heading=["Topic"],

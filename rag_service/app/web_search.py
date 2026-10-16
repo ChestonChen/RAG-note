@@ -59,9 +59,9 @@ class WebSearchService:
             response.raise_for_status()
             return WebSearchResult(self._sources(response.json()), "ok")
         except httpx.TimeoutException as exc:
-            return WebSearchResult([], "timeout", "web search timed out", str(exc))
+            return WebSearchResult([], "timeout", "web search timed out", type(exc).__name__)
         except Exception as exc:
-            return WebSearchResult([], "error", "web search request failed", str(exc))
+            return WebSearchResult([], "error", "web search request failed", type(exc).__name__)
 
     def _search_proxy_gateway(self, question: str) -> WebSearchResult:
         url = self.settings.web_search_proxy_url
@@ -80,9 +80,9 @@ class WebSearchService:
             response.raise_for_status()
             return WebSearchResult(self._sources(response.json()), "ok")
         except httpx.TimeoutException as exc:
-            return WebSearchResult([], "timeout", "web search timed out", str(exc))
+            return WebSearchResult([], "timeout", "web search timed out", type(exc).__name__)
         except Exception as exc:
-            return WebSearchResult([], "error", "web search request failed", str(exc))
+            return WebSearchResult([], "error", "web search request failed", type(exc).__name__)
 
     def _sources(self, body: Any) -> list[WebSource]:
         if not isinstance(body, dict):

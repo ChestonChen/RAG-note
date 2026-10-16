@@ -152,12 +152,42 @@ def test_weak_only_evidence_stream_abstains_without_generation():
     assert metadata["retrieval_debug"]["evidence"]["caps"]
 
 
-def test_generation_error_marks_user_message_and_emits_safe_error():
+def test_metadata_only_stream_abstains_without_generation():
+    class FailingGeneration:
+        def stream(self, question, context):
+            raise AssertionError("metadata-only hit must not reach the answer model")
+
+    hit = SearchHit(
+        chunk_id=9,
+        content="Redis persistence uses RDB snapshots and AOF logs.",
+        source="knowledge/Redis Cluster.pdf",
+        title="Redis Cluster failover primary election",
+        score=0.99,
+        matched_channels=["vector", "keyword"],
+    )
+    client, _ = _client([hit], FailingGeneration())
+    conversation_id = client.post("/v1/conversations", json={}).json()["id"]
+
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/stream",
+        json={
+            "question": "How does Redis Cluster elect a new primary during failover?",
+            "allow_web_fallback": False,
+        },
+    )
+
+    events = _events(response)
+    metadata = next(payload for name, payload in events if name == "metadata")
+    assert metadata["confidence"] == "low"
+    assert metadata["citations"] == []
+
+
+def test_generation_error_marks_user_message_and_emits_safe_error(caplog):
     client, sessions = _client(
         [
             SearchHit(
                 chunk_id=1,
-                content="证据",
+        content="证据",
                 source="source.md",
                 title="source",
                 score=0.8,
@@ -169,12 +199,13 @@ def test_generation_error_marks_user_message_and_emits_safe_error():
     conversation_id = client.post("/v1/conversations", json={}).json()["id"]
     response = client.post(
         f"/v1/conversations/{conversation_id}/stream",
-        json={"question": "会失败吗", "allow_web_fallback": False},
+        json={"question": "证据", "allow_web_fallback": False},
     )
     events = _events(response)
     assert response.status_code == 200
     assert events[-1][0] == "error"
     assert "provider exploded" not in json.dumps(events[-1][1])
+    assert "provider exploded" not in caplog.text
     with sessions() as session:
         messages = session.scalars(select(Message)).all()
         assert len(messages) == 1

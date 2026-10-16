@@ -28,6 +28,7 @@ class Settings(BaseSettings):
         default=Path("config/term_dictionary.json"),
         validation_alias="TERM_DICTIONARY_PATH",
     )
+    eval_cases_root: Path = Field(default=Path("eval"), validation_alias="EVAL_CASES_ROOT")
 
     embedding_provider: Literal["hashing", "openai_compatible", "sentence_transformers"] = Field(
         default="hashing",
@@ -98,7 +99,7 @@ class Settings(BaseSettings):
     retrieval_trigram_rrf_weight: float = Field(default=0.5, ge=0, validation_alias="RETRIEVAL_TRIGRAM_RRF_WEIGHT")
     retrieval_context_limit: int = Field(default=8, ge=1, validation_alias="RETRIEVAL_CONTEXT_LIMIT")
     retrieval_neighbor_window: int = Field(default=1, ge=0, validation_alias="RETRIEVAL_NEIGHBOR_WINDOW")
-    retrieval_per_document_limit: int = Field(default=3, ge=1, validation_alias="RETRIEVAL_PER_DOCUMENT_LIMIT")
+    retrieval_per_document_limit: int = Field(default=5, ge=1, validation_alias="RETRIEVAL_PER_DOCUMENT_LIMIT")
     retrieval_query_expansion_enabled: bool = Field(
         default=True, validation_alias="RETRIEVAL_QUERY_EXPANSION_ENABLED"
     )
@@ -133,6 +134,11 @@ class Settings(BaseSettings):
         if self.term_dictionary_path.is_absolute():
             return self.term_dictionary_path
         return (self.project_root / self.term_dictionary_path).resolve()
+
+    def resolved_eval_cases_root(self) -> Path:
+        if self.eval_cases_root.is_absolute():
+            return self.eval_cases_root.resolve()
+        return (self.project_root / self.eval_cases_root).resolve()
 
     def embedding_signature(self) -> str:
         return f"{self.embedding_provider}:{self.embedding_model}:dim={self.embedding_dimensions}"

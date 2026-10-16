@@ -6,11 +6,16 @@ def test_settings_use_project_defaults(monkeypatch):
 
     monkeypatch.delenv("KNOWLEDGE_ROOT", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("RETRIEVAL_PER_DOCUMENT_LIMIT", raising=False)
+    monkeypatch.delenv("EVAL_CASES_ROOT", raising=False)
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.knowledge_root == Path("knowledge")
     assert settings.database_url.startswith("postgresql+psycopg://")
+    assert settings.retrieval_per_document_limit == 5
+    assert settings.eval_cases_root == Path("eval")
+    assert settings.resolved_eval_cases_root() == settings.project_root / "eval"
 
 
 def test_settings_read_environment_overrides(monkeypatch, tmp_path):
@@ -18,11 +23,13 @@ def test_settings_read_environment_overrides(monkeypatch, tmp_path):
 
     monkeypatch.setenv("KNOWLEDGE_ROOT", str(tmp_path))
     monkeypatch.setenv("CHUNK_MAX_TOKENS", "320")
+    monkeypatch.setenv("EVAL_CASES_ROOT", str(tmp_path / "approved-eval"))
 
     settings = Settings()
 
     assert settings.knowledge_root == tmp_path
     assert settings.chunk_max_tokens == 320
+    assert settings.eval_cases_root == tmp_path / "approved-eval"
 
 
 def test_section_aware_chunking_signature_reindexes_legacy_chunks():

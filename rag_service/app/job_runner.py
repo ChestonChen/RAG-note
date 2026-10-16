@@ -67,7 +67,19 @@ class IngestionJobRunner:
                 raise ConflictError("an ingestion job is already active") from exc
             job_id = job.id
 
-        future = self._executor.submit(self.run, job_id, force)
+        try:
+            future = self._executor.submit(self.run, job_id, force)
+        except RuntimeError:
+            with self.session_factory() as session:
+                failed = session.get(IngestionJob, job_id)
+                if failed is not None:
+                    failed.status = "failed"
+                    failed.current_stage = "failed"
+                    failed.error_message = "ingestion worker unavailable"
+                    failed.finished_at = datetime.now(timezone.utc)
+                    failed.active_key = None
+                    session.commit()
+            raise
         if not run_async:
             future.result()
         return self.get(job_id)

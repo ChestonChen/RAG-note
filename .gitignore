@@ -1,5 +1,12 @@
 .env
 .venv/
+models/
+.vite/
+temp_contents.json
+reports/
+knowledge/gitee/
+knowledge/gitee-benchmark/
+docs/superpowers/
 __pycache__/
 *.py[cod]
 .pytest_cache/

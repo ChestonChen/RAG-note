@@ -199,3 +199,12 @@ def test_remote_provider_redacts_exception_details():
     assert "secret-token" not in str(error.value)
     assert "secret-key" not in str(error.value)
     assert "provider.example" not in str(error.value)
+
+
+def test_safe_embedding_error_redacts_existing_provider_error_details():
+    from rag_service.app.embeddings import EmbeddingProviderError, safe_embedding_error
+
+    error = safe_embedding_error(EmbeddingProviderError("api_key=secret-token"))
+
+    assert str(error) == "embedding provider request failed (EmbeddingProviderError)"
+    assert "secret-token" not in str(error)

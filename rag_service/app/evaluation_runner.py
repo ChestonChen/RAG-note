@@ -18,9 +18,34 @@ from .models import EvalResult, EvalRun
 from .schemas import EvalRunRequest
 
 
+def resolve_eval_cases_path(
+    settings: Settings,
+    value: str | None,
+    *,
+    reject_absolute: bool = False,
+) -> Path:
+    """Resolve a case file beneath the configured evaluation root."""
+
+    raw = Path(value or "retrieval_cases.jsonl")
+    if reject_absolute and (raw.is_absolute() or bool(raw.root) or bool(raw.drive)):
+        raise ValueError("cases_path must be relative to the configured evaluation cases root")
+
+    root = settings.resolved_eval_cases_root()
+    if raw.is_absolute():
+        candidate = raw.resolve()
+    else:
+        root_relative = root.relative_to(settings.project_root) if root.is_relative_to(settings.project_root) else None
+        relative = raw
+        if root_relative and raw.parts[: len(root_relative.parts)] == root_relative.parts:
+            relative = Path(*raw.parts[len(root_relative.parts) :])
+        candidate = (root / relative).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError("cases_path must stay under the configured evaluation cases root")
+    return candidate
+
+
 def _safe_case_path(settings: Settings, value: str | None) -> Path:
-    path = Path(value or "eval/retrieval_cases.jsonl")
-    return path if path.is_absolute() else (settings.project_root / path).resolve()
+    return resolve_eval_cases_path(settings, value)
 
 
 def _safe_error(exc: Exception) -> str:
@@ -67,6 +92,7 @@ class EvaluationRunner:
         config = {
             "cases_path": cases_path.name,
             "limit": request.limit,
+            "profile": request.profile,
             "generate_answers": request.generate_answers,
             "judge_with_ai": request.judge_with_ai,
             "retrieval": {
@@ -94,7 +120,7 @@ class EvaluationRunner:
                 active_key=1,
                 total_cases=len(cases),
                 config=config,
-                profile="ours",
+                profile=request.profile,
                 dataset={"name": cases_path.stem},
             )
             session.add(run)
@@ -105,12 +131,25 @@ class EvaluationRunner:
                 raise ConflictError("an evaluation run is already active") from exc
             run_id = run.id
             self._case_paths[run_id] = cases_path
-        future = self._executor.submit(self.run, run_id, request)
+        try:
+            future = self._executor.submit(self.run, run_id, request)
+        except Exception as exc:
+            self._finish_failed(run_id, _safe_error(exc))
+            return self.get(run_id)
         if not run_async:
-            future.result()
+            try:
+                future.result()
+            except Exception as exc:
+                self._finish_failed(run_id, _safe_error(exc))
         return self.get(run_id)
 
     def run(self, run_id: int, request: EvalRunRequest) -> None:
+        try:
+            self._run(run_id, request)
+        except Exception as exc:
+            self._finish_failed(run_id, _safe_error(exc))
+
+    def _run(self, run_id: int, request: EvalRunRequest) -> None:
         from scripts.evaluate_retrieval import evaluate_cases, load_cases
 
         with self.session_factory() as session:
@@ -141,7 +180,7 @@ class EvaluationRunner:
                     [case],
                     limit=request.limit,
                     confidence_threshold=self.settings.low_confidence_threshold,
-                    profile="ours",
+                    profile=request.profile,
                     dataset={"name": cases_path.stem},
                 )
                 result = report["cases"][0]
@@ -193,7 +232,7 @@ class EvaluationRunner:
                     successful_cases,
                     limit=request.limit,
                     confidence_threshold=self.settings.low_confidence_threshold,
-                    profile="ours",
+                    profile=request.profile,
                     dataset={"name": cases_path.stem},
                 ).get("metrics", {})
             except Exception:
@@ -211,14 +250,17 @@ class EvaluationRunner:
         self._case_paths.pop(run_id, None)
 
     def _finish_failed(self, run_id: int, error: str) -> None:
-        with self.session_factory() as session:
-            run = session.get(EvalRun, run_id)
-            if run is not None:
-                run.status = "failed"
-                run.error_message = error
-                run.active_key = None
-                run.finished_at = datetime.now(timezone.utc)
-                session.commit()
+        try:
+            with self.session_factory() as session:
+                run = session.get(EvalRun, run_id)
+                if run is not None:
+                    run.status = "failed"
+                    run.error_message = error
+                    run.active_key = None
+                    run.finished_at = datetime.now(timezone.utc)
+                    session.commit()
+        finally:
+            self._case_paths.pop(run_id, None)
 
     def get(self, run_id: int) -> EvalRun:
         with self.session_factory() as session:
@@ -248,4 +290,4 @@ class EvaluationRunner:
         self._executor.shutdown(wait=True)
 
 
-__all__ = ["EvaluationRunner"]
+__all__ = ["EvaluationRunner", "resolve_eval_cases_path"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +51,10 @@ class EvidenceReport(BaseModel):
     score: float = Field(ge=0, le=1)
     direct_hit_count: int = Field(ge=0)
     eligible_citation_count: int = Field(ge=0)
+    evidence_gate_passed: bool = False
+    evidence_gate_reason: str = "no_direct_evidence"
+    evidence_anchor_coverage: float = Field(default=0, ge=0, le=1)
+    relationship_evidence: bool = False
     channel_agreement: float = Field(ge=0, le=1)
     term_coverage: float = Field(ge=0, le=1)
     metadata_alignment: float = Field(ge=0, le=1)
@@ -166,9 +170,18 @@ class EvalJudgeRequest(BaseModel):
 class EvalRunRequest(BaseModel):
     cases_path: str | None = None
     limit: int = Field(default=5, ge=1, le=30)
+    profile: Literal["ours", "reference_like"] = "ours"
     generate_answers: bool = False
     judge_with_ai: bool = False
     run_async: bool = False
+
+
+class EvalTuneRequest(BaseModel):
+    run_id: int | None = Field(default=None, ge=1)
+    cases_path: str | None = None
+    grid: dict[str, list[Any]] = Field(min_length=1)
+    limit_cases: int | None = Field(default=None, ge=1, le=10000)
+    limit: int = Field(default=5, ge=1, le=30)
 
 
 class EvalRunResponse(BaseModel):
@@ -184,6 +197,7 @@ class EvalRunResponse(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     profile: str | None = None
     dataset: dict[str, Any] = Field(default_factory=dict)
+    tuning: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime

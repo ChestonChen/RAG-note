@@ -67,7 +67,7 @@ def _hit(score=0.8):
 
 
 def _sqlite_settings(tmp_path, **kwargs):
-    return Settings(database_url=f"sqlite+pysqlite:///{tmp_path / 'api.sqlite'}", **kwargs)
+    return Settings(database_url=f"sqlite+pysqlite:///{tmp_path / 'api.sqlite'}", eval_cases_root=tmp_path, **kwargs)
 
 
 def test_low_confidence_can_use_web_fallback_and_expose_sources(tmp_path):
@@ -228,7 +228,16 @@ def test_admin_qa_logs_returns_persisted_answer(tmp_path):
 
 
 def test_admin_eval_judge_is_protected_and_returns_optional_status(tmp_path):
-    settings = _sqlite_settings(tmp_path, admin_api_key="secret")
+    # Keep this contract test offline and independent from a developer's
+    # project .env. The production resolver intentionally falls back to the
+    # normal LLM key, so an explicit empty judge configuration is required.
+    settings = _sqlite_settings(
+        tmp_path,
+        admin_api_key="secret",
+        eval_judge_api_key=None,
+        eval_judge_model=None,
+        llm_api_key=None,
+    )
     engine = init_db(get_engine(settings), settings=settings)
     factory = get_session_factory(engine=engine)
     app = create_app(settings, session_factory=factory)
@@ -251,7 +260,7 @@ def test_admin_eval_judge_is_protected_and_returns_optional_status(tmp_path):
 def test_admin_eval_run_generates_answer_when_ai_judge_is_requested(tmp_path):
     cases = tmp_path / "cases.jsonl"
     cases.write_text(
-        '{"id":"one","question":"q","relevant_sources":["knowledge/pgvector.md"],"answerable":true}\n',
+        '{"id":"one","question":"q","relevant_sources":["knowledge/pgvector.md"],"answerable":true,"evidence_groups":[["pgvector"]]}\n',
         encoding="utf-8",
     )
     settings = _sqlite_settings(tmp_path, admin_api_key="secret")
@@ -268,7 +277,7 @@ def test_admin_eval_run_generates_answer_when_ai_judge_is_requested(tmp_path):
     response = TestClient(app).post(
         "/v1/admin/eval/run",
         headers={"X-Admin-API-Key": "secret"},
-        json={"cases_path": str(cases), "judge_with_ai": True},
+        json={"cases_path": cases.name, "judge_with_ai": True},
     )
 
     assert response.status_code == 200

@@ -183,6 +183,7 @@ class EvalRun(TimestampMixin, Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dataset: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    tuning: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     results: Mapped[list["EvalResult"]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="EvalResult.case_index"

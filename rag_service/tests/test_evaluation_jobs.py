@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from rag_service.app.api import create_app
 from rag_service.app.config import Settings
@@ -52,6 +53,7 @@ def _fixture(tmp_path: Path, cases: list[dict[str, object]]):
         admin_api_key="test-admin",
         eval_judge_api_key="private-secret-value",
         low_confidence_threshold=0.0,
+        eval_cases_root=tmp_path,
     )
     engine = init_db(get_engine(settings))
     factory = get_session_factory(engine=engine)
@@ -88,6 +90,34 @@ def test_eval_run_persists_case_results_and_metrics(tmp_path: Path):
         assert session.get(EvalRun, run.id) is not None
         assert session.query(EvalResult).count() == 1
     runner.shutdown()
+
+
+def test_eval_run_profile_is_persisted_and_forwarded_to_evaluator(tmp_path: Path, monkeypatch):
+    settings, _, path, runner = _fixture(
+        tmp_path,
+        [{"id": "case-1", "question": "known", "relevant_sources": ["a.md"], "answerable": True, "evidence_groups": [["answer evidence"]]}],
+    )
+    import scripts.evaluate_retrieval as evaluation_module
+
+    profiles: list[str | None] = []
+
+    def fake_evaluate_cases(retrieval, context, cases, **kwargs):
+        profiles.append(kwargs.get("profile"))
+        return {"cases": [{"id": cases[0]["id"]}], "metrics": {"hit_at_1": 1.0}}
+
+    monkeypatch.setattr(evaluation_module, "evaluate_cases", fake_evaluate_cases)
+    request = EvalRunRequest(cases_path=str(path), profile="reference_like", run_async=False)
+
+    run = runner.create(request, run_async=False)
+
+    assert runner.get(run.id).profile == "reference_like"
+    assert profiles == ["reference_like", "reference_like"]
+    runner.shutdown()
+
+
+def test_eval_run_profile_rejects_unknown_values():
+    with pytest.raises(ValidationError):
+        EvalRunRequest(profile="unknown")
 
 
 def test_eval_run_continues_after_case_error_and_records_safe_error(tmp_path: Path):
@@ -144,6 +174,48 @@ def test_eval_run_active_conflict_and_protected_routes(tmp_path: Path):
     runner.shutdown()
 
 
+def test_eval_run_submission_after_shutdown_is_failed_and_releases_active_key(tmp_path: Path):
+    settings, factory, path, runner = _fixture(
+        tmp_path,
+        [{"id": "case-1", "question": "known", "relevant_sources": ["a.md"], "answerable": True, "evidence_groups": [["answer evidence"]]}],
+    )
+    runner.shutdown()
+
+    run = runner.create(EvalRunRequest(cases_path=str(path)), run_async=True)
+
+    assert run.status == "failed"
+    assert run.active_key is None
+    with factory() as session:
+        stored = session.get(EvalRun, run.id)
+        assert stored is not None
+        assert stored.status == "failed"
+        assert stored.active_key is None
+
+
+def test_eval_run_worker_session_error_is_finalized_and_releases_active_key(tmp_path: Path):
+    settings, factory, path, runner = _fixture(
+        tmp_path,
+        [{"id": "case-1", "question": "known", "relevant_sources": ["a.md"], "answerable": True, "evidence_groups": [["answer evidence"]]}],
+    )
+    calls = 0
+
+    def flaky_factory():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("session unavailable")
+        return factory()
+
+    runner.session_factory = flaky_factory
+
+    run = runner.create(EvalRunRequest(cases_path=str(path)), run_async=False)
+
+    assert run.status == "failed"
+    assert run.active_key is None
+    assert run.error_message == "evaluation failed (RuntimeError)"
+    runner.shutdown()
+
+
 def test_sync_eval_route_keeps_report_shape_and_run_async_switch(tmp_path: Path):
     settings, factory, path, runner = _fixture(
         tmp_path,
@@ -154,7 +226,7 @@ def test_sync_eval_route_keeps_report_shape_and_run_async_switch(tmp_path: Path)
     response = client.post(
         "/v1/admin/eval/run",
         headers=headers,
-        json={"cases_path": str(path), "run_async": False},
+        json={"cases_path": path.name, "run_async": False},
     )
 
     assert response.status_code == 200
@@ -162,4 +234,66 @@ def test_sync_eval_route_keeps_report_shape_and_run_async_switch(tmp_path: Path)
     assert response.json()["metrics"]["hit_at_1"] == 1.0
     assert response.json()["cases"][0]["id"] == "case-1"
     assert client.post("/v1/admin/eval/run", headers=headers, json={"cases_path": "missing.jsonl"}).status_code == 404
+    runner.shutdown()
+
+
+def test_eval_and_tuning_routes_reject_absolute_or_outside_case_paths(tmp_path: Path):
+    settings, factory, path, runner = _fixture(
+        tmp_path,
+        [{"id": "case-1", "question": "known", "relevant_sources": ["a.md"], "answerable": True, "evidence_groups": [["answer evidence"]]}],
+    )
+    client = TestClient(
+        create_app(
+            settings=settings,
+            session_factory=factory,
+            retrieval_service=runner.retrieval_service,
+            evaluation_runner=runner,
+        )
+    )
+    headers = {"X-Admin-API-Key": "test-admin"}
+
+    eval_response = client.post(
+        "/v1/admin/eval/run",
+        headers=headers,
+        json={"cases_path": str(path), "run_async": False},
+    )
+    assert eval_response.status_code == 400
+    assert "relative" in eval_response.json()["detail"]
+
+    drive_relative_response = client.post(
+        "/v1/admin/eval/run",
+        headers=headers,
+        json={"cases_path": "C:outside.jsonl", "run_async": False},
+    )
+    assert drive_relative_response.status_code == 400
+    assert "relative" in drive_relative_response.json()["detail"]
+
+    tune_response = client.post(
+        "/v1/admin/eval/tune",
+        headers=headers,
+        json={"cases_path": "../outside.jsonl", "grid": {"retrieval_context_limit": [4]}},
+    )
+    assert tune_response.status_code == 400
+    assert "under the configured evaluation cases root" in tune_response.json()["detail"]
+    runner.shutdown()
+
+
+def test_eval_run_can_persist_and_query_tuning_summary(tmp_path: Path):
+    settings, factory, path, runner = _fixture(
+        tmp_path,
+        [{"id": "case-1", "question": "known", "relevant_sources": ["a.md"], "answerable": True, "evidence_groups": [["answer evidence"]]}],
+    )
+    run = runner.create(EvalRunRequest(cases_path=str(path), run_async=False), run_async=False)
+    with factory() as session:
+        stored = session.get(EvalRun, run.id)
+        stored.tuning = {"trial_count": 1, "best": {"params": {"retrieval_context_limit": 8}}}
+        session.commit()
+
+    client = TestClient(create_app(settings=settings, session_factory=factory, retrieval_service=runner.retrieval_service, evaluation_runner=runner))
+    response = client.get(
+        f"/v1/admin/eval/runs/{run.id}/tuning",
+        headers={"X-Admin-API-Key": "test-admin"},
+    )
+    assert response.status_code == 200
+    assert response.json()["best"]["params"]["retrieval_context_limit"] == 8
     runner.shutdown()

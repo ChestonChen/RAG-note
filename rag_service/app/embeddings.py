@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from numbers import Real
 import re
 import threading
 from pathlib import Path
@@ -32,11 +33,35 @@ class EmbeddingProviderError(RuntimeError):
 def safe_embedding_error(error: Exception) -> EmbeddingProviderError:
     """Reduce arbitrary provider exceptions to their type, never their text."""
 
-    if isinstance(error, EmbeddingProviderError):
-        return error
     return EmbeddingProviderError(
         f"embedding provider request failed ({error.__class__.__name__})"
     )
+
+
+def embedding_values_are_finite(vector: Any) -> bool:
+    """Return whether a provider vector contains only finite numeric values."""
+
+    if not isinstance(vector, (list, tuple)):
+        return False
+    def is_finite_number(value: Any) -> bool:
+        if not isinstance(value, Real) or isinstance(value, bool):
+            return False
+        try:
+            return math.isfinite(value)
+        except (OverflowError, TypeError, ValueError):
+            return False
+
+    return all(is_finite_number(value) for value in vector)
+
+
+def embedding_provider_signature(provider: EmbeddingProvider, settings: Settings) -> str:
+    """Describe the provider that actually produced vectors, not only config."""
+
+    provider_name = str(getattr(provider, "provider_name", settings.embedding_provider))
+    model = getattr(provider, "model", None) or getattr(provider, "model_path", None)
+    model_name = str(model or settings.embedding_model)
+    dimensions = getattr(provider, "dimensions", None) or settings.embedding_dimensions
+    return f"{provider_name}:{model_name}:dim={int(dimensions)}"
 
 
 _TOKEN_RE = re.compile(r"[\w]+|[^\W\s]", re.UNICODE)
@@ -324,5 +349,7 @@ __all__ = [
     "SentenceTransformersEmbeddingProvider",
     "build_embedding_provider",
     "create_embedding_provider",
+    "embedding_provider_signature",
+    "embedding_values_are_finite",
     "safe_embedding_error",
 ]

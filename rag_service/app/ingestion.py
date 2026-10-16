@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +15,35 @@ from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .db import get_session_factory
-from .embeddings import EmbeddingProvider, create_embedding_provider, safe_embedding_error
+from .embeddings import (
+    EmbeddingProvider,
+    create_embedding_provider,
+    embedding_provider_signature,
+    embedding_values_are_finite,
+    safe_embedding_error,
+)
 from .models import Chunk, Document, IngestionJob
 from .search_text import build_search_text
 
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_ERROR_RE = re.compile(
+    r"(?i)(?:authorization['\"]?\s*[:=]\s*['\"]?(?:bearer\s+)?[^\s,;}'\"]+"
+    r"(?:\s+[^\s,;}'\"]+)?|"
+    r"(?:api[_-]?key|bearer|token|password|secret|cookie)['\"]?\s*[:=]\s*['\"]?[^\s,;}'\"]+)"
+)
+_URL_RE = re.compile(r"(?i)https?://[^\s]+")
+
+
+def safe_ingestion_error(error: Exception) -> str:
+    """Return a bounded error message with provider credentials and URLs removed."""
+
+    message = str(error).strip()
+    message = _SENSITIVE_ERROR_RE.sub("[redacted]", message)
+    message = _URL_RE.sub("[redacted-url]", message)
+    if not message:
+        message = "ingestion failed"
+    return f"{type(error).__name__}: {message[:3900]}"
 
 try:  # Task 2 may be developed independently from this module.
     from .chunking import chunk_document as _chunk_document
@@ -185,7 +210,7 @@ class IngestionService:
         source_path = self._source_path(path, root)
         parser_signature = self.settings.parser_version
         chunking_signature = self.settings.chunking_signature()
-        embedding_signature = self.settings.embedding_signature()
+        embedding_signature = embedding_provider_signature(self.embedding_provider, self.settings)
         title = str(_value(parsed, "title", "name", default=path.stem) or path.stem)
         source_type = str(
             _value(
@@ -274,9 +299,9 @@ class IngestionService:
                 file_hash=digest,
                 parser_signature=self.settings.parser_version,
                 chunking_signature=self.settings.chunking_signature(),
-                embedding_signature=self.settings.embedding_signature(),
+                embedding_signature=embedding_provider_signature(self.embedding_provider, self.settings),
                 status="failed",
-                error_message=str(error)[:4000],
+                error_message=safe_ingestion_error(error),
                 file_mtime=path.stat().st_mtime,
             )
             session.add(document)
@@ -286,7 +311,7 @@ class IngestionService:
             self._delete_chunks(session, document.id)
             document.file_hash = digest
             document.status = "failed"
-            document.error_message = str(error)[:4000]
+            document.error_message = safe_ingestion_error(error)
             document.file_mtime = path.stat().st_mtime
         session.commit()
 
@@ -337,7 +362,7 @@ class IngestionService:
 
             parser_signature = self.settings.parser_version
             chunking_signature = self.settings.chunking_signature()
-            embedding_signature = self.settings.embedding_signature()
+            embedding_signature = embedding_provider_signature(self.embedding_provider, self.settings)
             for path in paths:
                 source_path = self._source_path(path, root)
                 if progress_callback:
@@ -384,6 +409,10 @@ class IngestionService:
                             "embedding provider returned a vector dimension that does not match "
                             f"EMBEDDING_DIMENSIONS={expected_dimensions}"
                         )
+                    if any(not embedding_values_are_finite(vector) for vector in vectors):
+                        raise RuntimeError(
+                            "embedding provider returned non-numeric or non-finite vector values"
+                        )
                     chunk_count = self._write_file(
                         session,
                         path=path,
@@ -399,7 +428,7 @@ class IngestionService:
                     if progress_callback:
                         progress_callback({"stage": "processed", "current_file": source_path, "summary": summary})
                 except Exception as error:  # isolate one bad source
-                    logger.exception("failed to ingest %s", path)
+                    logger.error("failed to ingest %s: %s", source_path, safe_ingestion_error(error))
                     self._mark_failed(session, path=path, root=root, digest=digest, error=error)
                     summary.failed_files += 1
                     if progress_callback:
@@ -418,7 +447,7 @@ class IngestionService:
                     summary.deleted_documents += 1
             session.commit()
 
-            job.status = "completed" if summary.failed_files == 0 else "completed_with_errors"
+            job.status = "completed" if summary.failed_files == 0 else "failed"
             job.processed_files = summary.processed_files
             job.skipped_files = summary.skipped_files
             job.failed_files = summary.failed_files
@@ -443,4 +472,5 @@ __all__ = [
     "compute_file_hash",
     "sha256_file",
     "should_reindex",
+    "safe_ingestion_error",
 ]

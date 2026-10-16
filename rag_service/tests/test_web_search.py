@@ -62,3 +62,21 @@ def test_web_search_reports_missing_credentials_without_network_call():
     assert result.status == "not_configured"
     assert result.sources == []
     assert http.calls == []
+
+
+def test_web_search_error_redacts_provider_exception_details():
+    class FailingHttpClient:
+        def post(self, url, **kwargs):
+            raise RuntimeError("provider-secret-key and response-body")
+
+    settings = Settings(
+        web_search_enabled=True,
+        web_search_provider="tavily",
+        tavily_api_key="tavily-key",
+    )
+
+    result = WebSearchService(settings, client=FailingHttpClient()).search("query")
+
+    assert result.status == "error"
+    assert result.error == "RuntimeError"
+    assert "provider-secret-key" not in str(result)

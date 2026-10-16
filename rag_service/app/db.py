@@ -233,6 +233,7 @@ def _ensure_eval_columns(engine: Engine) -> None:
             "config": "JSON NOT NULL DEFAULT '{}'",
             "profile": "VARCHAR(64) NULL",
             "dataset": "JSON NOT NULL DEFAULT '{}'",
+            "tuning": "JSON NOT NULL DEFAULT '{}'",
         }
         with engine.begin() as connection:
             for name, definition in definitions.items():

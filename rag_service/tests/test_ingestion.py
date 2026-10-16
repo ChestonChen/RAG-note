@@ -5,12 +5,14 @@ from types import SimpleNamespace
 from rag_service.app.config import Settings
 from rag_service.app.db import get_engine, get_session_factory, init_db
 from rag_service.app.ingestion import IngestionService
-from rag_service.app.models import Chunk, Document
+from rag_service.app.models import Chunk, Document, IngestionJob
 
 
 class FakeEmbeddingProvider:
     def __init__(self, dimensions: int = 384) -> None:
         self.dimensions = dimensions
+        self.provider_name = "hashing"
+        self.model = "feature-hashing"
         self.calls: list[list[str]] = []
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -36,6 +38,8 @@ def _service(tmp_path, parser=None, chunker=None):
     settings = Settings(
         knowledge_root=knowledge,
         database_url="sqlite+pysqlite:///:memory:",
+        embedding_provider="hashing",
+        embedding_dimensions=384,
     )
     engine = init_db(get_engine(settings))
     factory = get_session_factory(engine=engine)
@@ -181,3 +185,49 @@ def test_embedding_provider_error_is_redacted_from_document_and_logs(tmp_path, c
     assert "secret-key" not in caplog.text
     assert "provider.example" not in caplog.text
     assert "RuntimeError" in error
+
+
+def test_sync_scan_uses_bounded_failed_job_status_and_redacts_errors(tmp_path, caplog):
+    def parser(path):
+        if path.stem == "bad":
+            raise ValueError(
+                "api_key=secret-token headers={'Authorization': 'Bearer header-token', "
+                "'X-API-Key': 'header-key'} Authorization: Bearer header-token "
+                "https://provider.example/v1"
+            )
+        return SimpleNamespace(title=path.stem)
+
+    knowledge, service, factory = _service(tmp_path, parser=parser)
+    (knowledge / "bad.md").write_text("bad", encoding="utf-8")
+
+    summary = service.scan()
+
+    assert summary.failed_files == 1
+    with factory() as session:
+        job = session.query(IngestionJob).one()
+        document = session.query(Document).one()
+        assert job.status == "failed"
+        assert len(job.status) <= 16
+        assert "secret-token" not in (document.error_message or "")
+        assert "header-token" not in (document.error_message or "")
+        assert "header-key" not in (document.error_message or "")
+        assert "provider.example" not in (document.error_message or "")
+    assert "secret-token" not in caplog.text
+    assert "header-token" not in caplog.text
+    assert "header-key" not in caplog.text
+    assert "provider.example" not in caplog.text
+    assert str(knowledge) not in caplog.text
+
+
+def test_ingestion_persists_runtime_embedding_signature(tmp_path):
+    knowledge, service, factory = _service(tmp_path)
+    service.settings.embedding_model = "BAAI/bge-m3"
+    source = knowledge / "runtime-signature.md"
+    source.write_text("body", encoding="utf-8")
+
+    summary = service.scan()
+
+    assert summary.processed_files == 1
+    with factory() as session:
+        document = session.query(Document).one()
+        assert document.embedding_signature == "hashing:feature-hashing:dim=384"

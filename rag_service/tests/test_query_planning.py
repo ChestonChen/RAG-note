@@ -4,6 +4,12 @@ from rag_service.app.query_planning import QueryPlanner
 from rag_service.app.term_dictionary import TermDictionary
 
 
+def test_query_planner_recognizes_udp_as_distinct_comparison_entity():
+    plan = QueryPlanner().plan("How does TCP differ from UDP?")
+
+    assert {entity.canonical for entity in plan.entities} >= {"tcp", "udp"}
+
+
 def test_custom_dictionary_alias_changes_plan(tmp_path):
     path = tmp_path / "terms.json"
     path.write_text(
@@ -101,4 +107,3 @@ def test_empty_or_invalid_dictionary_keys_fall_back_to_builtin(tmp_path):
         path = tmp_path / f"invalid-key-{index}.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         assert TermDictionary.load(path).source == "builtin"
-

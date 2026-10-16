@@ -6,8 +6,10 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,17 +22,19 @@ from .config import Settings, get_settings
 from .context import ContextBuilder, ContextPackage
 from .db import get_engine, get_session_factory
 from .evaluation import EvaluationJudge
-from .evaluation_runner import EvaluationRunner
+from .evaluation_runner import EvaluationRunner, resolve_eval_cases_path
 from .generation import ChatGenerationService
 from .ingestion import IngestionService
 from .job_runner import ConflictError, IngestionJobRunner
 from .models import Chunk, Conversation, Document, EvalResult, EvalRun, Message, QALog
 from .retrieval import RetrievalService
+from .tuning import TuningService
 from .schemas import (
     AskRequest,
     AskResponse,
     EvalJudgeRequest,
     EvalRunRequest,
+    EvalTuneRequest,
     HealthResponse,
     IngestRequest,
     IngestResponse,
@@ -126,6 +130,7 @@ def create_app(
     evaluation_judge: EvaluationJudge | Any | None = None,
     ingestion_job_runner: IngestionJobRunner | Any | None = None,
     evaluation_runner: EvaluationRunner | Any | None = None,
+    tuning_service: TuningService | Any | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     context_builder = ContextBuilder(settings)
@@ -152,6 +157,13 @@ def create_app(
             settings=settings,
             evaluation_judge=evaluation_judge,
             answer_generator=lambda question, context: generation_service.generate(question, context),
+        )
+    if tuning_service is None:
+        tuning_service = TuningService(
+            settings=settings,
+            session_factory=session_factory,
+            retrieval_service=retrieval_service,
+            context_builder=context_builder,
         )
 
     app = FastAPI(title="RAG Knowledge Base MVP", version="0.1.0")
@@ -205,6 +217,48 @@ def create_app(
             payload["web_sources"] = [source.model_dump() for source in context.web_sources]
         return payload
 
+    def _safe_web_search_status(result: Any) -> dict[str, Any]:
+        """Expose only bounded provider status metadata to clients and logs."""
+
+        statuses = {
+            "ok",
+            "disabled",
+            "not_configured",
+            "skipped",
+            "timeout",
+            "error",
+            "unsupported",
+        }
+        status = str(getattr(result, "status", "error"))
+        status = status if status in statuses else "error"
+        if status == "ok":
+            return {"status": status}
+        reasons = {
+            "disabled": "web search disabled",
+            "not_configured": "web search not configured",
+            "skipped": "web search skipped",
+            "timeout": "web search timed out",
+            "unsupported": "web search provider unsupported",
+            "error": "web search unavailable",
+        }
+        return {"status": status, "reason": reasons[status]}
+
+    def _generate_answer(question: str, context: ContextPackage) -> str:
+        try:
+            return generation_service.generate(question, context)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"LLM generation unavailable ({type(exc).__name__})",
+            ) from None
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"LLM generation failed ({type(exc).__name__})",
+            ) from None
+
+    evaluation_runner.answer_generator = _generate_answer
+
     def _persist_qa_log(
         *,
         question: str,
@@ -231,8 +285,8 @@ def create_app(
                     )
                 )
                 session.commit()
-        except Exception:
-            logger.exception("failed to persist QA log")
+        except Exception as exc:
+            logger.error("failed to persist QA log (%s)", type(exc).__name__)
 
     def _answer_low_evidence(context: ContextPackage) -> str:
         if context.web_sources:
@@ -277,6 +331,21 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="document file not found") from exc
         return lexical
+
+    def _delete_backup_path(source: Path) -> Path:
+        """Return a non-indexable sibling used while a delete transaction runs."""
+
+        return source.with_name(f".rag-delete-{uuid.uuid4().hex}.tmp")
+
+    def _remove_delete_backup(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("failed to remove knowledge delete backup: %s", path)
 
     @router.get("/v1/conversations", response_model=list[ConversationSummary])
     def list_conversations() -> list[ConversationSummary]:
@@ -386,20 +455,7 @@ def create_app(
                 web_search_status: dict[str, Any] = {"status": "not_needed"}
                 if request.allow_web_fallback and (not hits or score < settings.web_fallback_score_threshold):
                     web_result = web_search_service.search(request.question)
-                    raw_status = str(getattr(web_result, "status", "error"))
-                    safe_statuses = {
-                        "ok",
-                        "disabled",
-                        "not_configured",
-                        "skipped",
-                        "timeout",
-                        "error",
-                        "unsupported",
-                    }
-                    safe_status = raw_status if raw_status in safe_statuses else "error"
-                    web_search_status = {"status": safe_status}
-                    if safe_status == "error":
-                        web_search_status["reason"] = "web search unavailable"
+                    web_search_status = _safe_web_search_status(web_result)
                     sources = getattr(web_result, "sources", []) or []
                     if sources:
                         context.web_sources = sources
@@ -482,8 +538,12 @@ def create_app(
                     "complete",
                     {"assistant_message_id": assistant_message_id, "answer": answer, **metadata},
                 )
-            except Exception:
-                logger.exception("conversation stream failed", extra={"conversation_id": conversation_id})
+            except Exception as exc:
+                logger.error(
+                    "conversation stream failed (%s)",
+                    type(exc).__name__,
+                    extra={"conversation_id": conversation_id},
+                )
                 if user_message_id is not None:
                     try:
                         with session_factory() as session:
@@ -495,8 +555,12 @@ def create_app(
                                 if conversation is not None:
                                     _touch_conversation(conversation)
                                 session.commit()
-                    except Exception:
-                        logger.exception("failed to persist stream error", extra={"conversation_id": conversation_id})
+                    except Exception as persist_error:
+                        logger.error(
+                            "failed to persist stream error (%s)",
+                            type(persist_error).__name__,
+                            extra={"conversation_id": conversation_id},
+                        )
                 yield _sse_event(
                     "error",
                     {
@@ -541,7 +605,7 @@ def create_app(
         try:
             summary = ingestion_service.scan(force=request.force)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"ingestion failed ({type(exc).__name__})") from exc
         return _ingest_response(summary)
 
     @router.get("/v1/knowledge/documents", response_model=list[KnowledgeDocumentResponse])
@@ -649,7 +713,7 @@ def create_app(
         try:
             summary = ingestion_service.scan(force=request.force)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"ingestion failed ({type(exc).__name__})") from exc
         return _ingest_response(summary)
 
     @router.get("/v1/knowledge/documents/{document_id}/file")
@@ -676,22 +740,44 @@ def create_app(
     ) -> Response:
         _configured_admin_guard(x_admin_api_key)
         with session_factory() as session:
-            document = session.get(Document, document_id)
-            if document is None:
-                raise HTTPException(status_code=404, detail="document not found")
-            source = _safe_source_path(document)
             try:
-                source.unlink(missing_ok=True)
-            except OSError as exc:
-                session.rollback()
-                raise HTTPException(status_code=500, detail="failed to delete document file") from exc
-            session.execute(delete(Chunk).where(Chunk.document_id == document_id))
-            session.delete(document)
-            try:
-                session.commit()
+                document = session.get(Document, document_id)
             except Exception as exc:
                 session.rollback()
                 raise HTTPException(status_code=500, detail="failed to delete document record") from exc
+            if document is None:
+                raise HTTPException(status_code=404, detail="document not found")
+            source = _safe_source_path(document)
+            backup: Path | None = None
+            try:
+                if source.exists() or source.is_symlink():
+                    backup = _delete_backup_path(source)
+                    shutil.copyfile(source, backup, follow_symlinks=False)
+                source.unlink(missing_ok=True)
+            except OSError as exc:
+                _remove_delete_backup(backup)
+                session.rollback()
+                raise HTTPException(status_code=500, detail="failed to delete document file") from exc
+            try:
+                session.execute(delete(Chunk).where(Chunk.document_id == document_id))
+                session.delete(document)
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                if backup is not None:
+                    restored = False
+                    try:
+                        if not source.exists() and not source.is_symlink():
+                            backup.replace(source)
+                            restored = True
+                        else:
+                            logger.error("cannot restore deleted knowledge source: %s", source)
+                    except OSError:
+                        logger.exception("failed to restore deleted knowledge source: %s", source)
+                    if restored:
+                        _remove_delete_backup(backup)
+                raise HTTPException(status_code=500, detail="failed to delete document record") from exc
+            _remove_delete_backup(backup)
         return Response(status_code=204)
 
     @router.post("/v1/retrieval/search", response_model=SearchResponse)
@@ -728,11 +814,7 @@ def create_app(
         web_search_status: dict[str, Any] = {"status": "not_needed"}
         if request.allow_web_fallback and (not hits or score < settings.web_fallback_score_threshold):
             web_result = web_search_service.search(request.question)
-            web_search_status = {
-                "status": web_result.status,
-                **({"reason": web_result.reason} if web_result.reason else {}),
-                **({"error": web_result.error} if web_result.error else {}),
-            }
+            web_search_status = _safe_web_search_status(web_result)
             if web_result.sources:
                 context.web_sources = web_result.sources
                 used_web_search = True
@@ -766,12 +848,7 @@ def create_app(
                 web_sources=context.web_sources,
                 web_search_status=web_search_status,
             )
-        try:
-            answer = generation_service.generate(request.question, context)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"LLM generation failed: {exc}") from exc
+        answer = _generate_answer(request.question, context)
         confidence = "high" if score >= 0.65 else "medium"
         mode = "kb_plus_web" if used_web_search and hits else "web_only" if used_web_search else "kb_only"
         _persist_qa_log(
@@ -804,7 +881,7 @@ def create_app(
         try:
             summary = ingestion_service.scan(force=request.force)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"ingestion failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"ingestion failed ({type(exc).__name__})") from exc
         return _ingest_response(summary)
 
     @router.post("/v1/admin/ingest/jobs", response_model=IngestionJobResponse)
@@ -812,7 +889,7 @@ def create_app(
         request: IngestionJobCreateRequest,
         x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
     ) -> IngestionJobResponse:
-        _admin_guard(x_admin_api_key)
+        _configured_admin_guard(x_admin_api_key)
         try:
             job = ingestion_job_runner.create(force=request.force, run_async=request.run_async)
         except ConflictError as exc:
@@ -824,7 +901,7 @@ def create_app(
         x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> dict[str, Any]:
-        _admin_guard(x_admin_api_key)
+        _configured_admin_guard(x_admin_api_key)
         items = [IngestionJobResponse.model_validate(job) for job in ingestion_job_runner.list(limit)]
         return {"items": items, "count": len(items)}
 
@@ -833,7 +910,7 @@ def create_app(
         job_id: int,
         x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
     ) -> IngestionJobResponse:
-        _admin_guard(x_admin_api_key)
+        _configured_admin_guard(x_admin_api_key)
         try:
             job = ingestion_job_runner.get(job_id)
         except KeyError as exc:
@@ -848,7 +925,7 @@ def create_app(
         job_id: int,
         x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
     ) -> list[IngestionFailureResponse]:
-        _admin_guard(x_admin_api_key)
+        _configured_admin_guard(x_admin_api_key)
         try:
             failures = ingestion_job_runner.get_failures(job_id)
         except KeyError as exc:
@@ -865,7 +942,7 @@ def create_app(
             with session_factory() as session:
                 logs = list(session.scalars(select(QALog).order_by(QALog.created_at.desc()).limit(limit)).all())
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"cannot read QA logs: {exc}") from exc
+            raise HTTPException(status_code=503, detail=f"cannot read QA logs ({type(exc).__name__})") from exc
         return {
             "items": [
                 {
@@ -906,9 +983,12 @@ def create_app(
     ) -> dict[str, Any]:
         _admin_guard(x_admin_api_key)
         try:
+            resolve_eval_cases_path(settings, request.cases_path, reject_absolute=True)
             run = evaluation_runner.create(request, run_async=request.run_async)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="evaluation cases not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
@@ -940,6 +1020,40 @@ def create_app(
                 ]
         return payload
 
+    @router.post("/v1/admin/eval/tune")
+    def admin_eval_tune(
+        request: EvalTuneRequest,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> dict[str, Any]:
+        _configured_admin_guard(x_admin_api_key)
+        try:
+            cases_path = resolve_eval_cases_path(settings, request.cases_path, reject_absolute=True)
+            result = tuning_service.run(
+                cases_path,
+                request.grid,
+                limit_cases=request.limit_cases,
+                limit=request.limit,
+            )
+            if request.run_id is not None:
+                with session_factory() as session:
+                    run = session.get(EvalRun, request.run_id)
+                    if run is None:
+                        raise HTTPException(status_code=404, detail="evaluation run not found")
+                    # TuningService only returns whitelisted parameters,
+                    # metrics, timings and safe environment lines. Keep the
+                    # complete result so the run can be reproduced later.
+                    run.tuning = dict(result)
+                    session.commit()
+            return result
+        except HTTPException:
+            raise
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="evaluation cases not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"tuning failed ({type(exc).__name__})") from None
+
     @router.get("/v1/admin/eval/runs", response_model=dict[str, Any])
     def list_eval_runs(
         x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
@@ -969,6 +1083,18 @@ def create_app(
             return EvalRunResponse.model_validate(evaluation_runner.get(run_id))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="evaluation run not found") from exc
+
+    @router.get("/v1/admin/eval/runs/{run_id}/tuning", response_model=dict[str, Any])
+    def get_eval_tuning(
+        run_id: int,
+        x_admin_api_key: str | None = Header(default=None, alias="X-Admin-API-Key"),
+    ) -> dict[str, Any]:
+        _admin_guard(x_admin_api_key)
+        try:
+            run = evaluation_runner.get(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="evaluation run not found") from exc
+        return dict(run.tuning or {})
 
     @router.get("/v1/admin/eval/runs/{run_id}/results", response_model=list[EvalResultResponse])
     def get_eval_results(

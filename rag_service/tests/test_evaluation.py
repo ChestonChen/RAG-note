@@ -137,3 +137,40 @@ def test_evaluation_report_records_profile_and_dataset_metadata():
         "name": "gitee-note-repository",
         "version": "2026-10-14",
     }
+    assert report["metadata"]["profile_applied"] is False
+    assert report["metadata"]["profile_semantics"] == "descriptive_label_only"
+
+
+def test_evaluation_report_sanitizes_urls_in_dataset_metadata():
+    cases = [{
+        "id": "safe-metadata",
+        "question": "metadata question",
+        "relevant_sources": [],
+        "answerable": False,
+    }]
+    report = evaluate_cases(
+        FakeRetrievalService({"metadata question": []}),
+        ContextBuilder(),
+        cases,
+        dataset={
+            "source_dataset_url": "https://user:secret@example.test/data.json?token=hidden&ref=main",
+        },
+    )
+
+    assert report["metadata"]["dataset"]["source_dataset_url"] == "https://example.test/data.json?ref=main"
+
+
+def test_evaluation_normalizes_benchmark_root_in_relevant_sources():
+    cases = [{
+        "id": "benchmark-source",
+        "question": "source question",
+        "relevant_sources": ["gitee-benchmark/C++/vector复习.pdf"],
+        "answerable": True,
+    }]
+    report = evaluate_cases(
+        FakeRetrievalService({"source question": [_hit(1, "C++/vector复习.pdf", 0.8, rank=1)]}),
+        ContextBuilder(),
+        cases,
+    )
+
+    assert report["metrics"]["hit_at_1"] == 1.0
