@@ -6,7 +6,6 @@ temp_contents.json
 reports/
 knowledge/gitee/
 knowledge/gitee-benchmark/
-docs/superpowers/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -14,4 +13,3 @@ __pycache__/
 postgres_data/
 rag_service/log/
 rag_service/.coverage
-.superpowers/
